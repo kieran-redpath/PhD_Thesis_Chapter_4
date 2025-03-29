@@ -1,0 +1,2157 @@
+---
+title: "2_sc-seq_dasatinib_subclustering"
+author: "Kieran Redpath"
+date: "2024-01-19"
+output: html_document
+---
+
+# Setup
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+### Load packages
+```{r, warning=FALSE, message =FALSE}
+# General
+library(dplyr)
+# For single cell analysis
+library(Seurat)
+#library(patchwork)
+library(celldex)
+library(SingleR)
+library(scater)
+# For clustering analysis
+library(clustree)
+# For sc-type cell type annotation
+library(HGNChelper)
+library(openxlsx)
+# sc-type functions from GitHub
+source("https://raw.githubusercontent.com/IanevskiAleksandr/sc-type/master/R/gene_sets_prepare.R");
+source("https://raw.githubusercontent.com/IanevskiAleksandr/sc-type/master/R/sctype_score_.R")
+source("https://raw.githubusercontent.com/IanevskiAleksandr/sc-type/master/R/auto_detect_tissue_type.R")
+# For plotting sc-type scores and marker genes
+library(ggraph)
+library(igraph)
+library(tidyverse)
+library(data.tree)
+library(gridExtra)
+# For differential expression analysis
+library(limma)
+library(edgeR)
+library(DESeq2)
+library(patchwork)
+# IF YOU HAVE PROBLEMS WITH ANYTHING AND/OR WANT TO UPDATE SEURAT, BE AWARE OF THIS!!!
+# https://satijalab.org/seurat/articles/announcements#changes-in-seurat-v5
+library(ggpubr)
+# For identifying doublets in data
+library(DoubletFinder)
+# For fgsea
+library(fgsea)
+library(data.table)
+library(org.Mm.eg.db)
+# For comparing outputs of fgsea
+library(VennDiagram)
+library(grid)
+# For inspecting data and plotting
+library(ggplot2)
+library(rlang)
+library(gplots)
+# For heatmaps
+source('data/heatmap-mik.R')
+library(viridis)
+# Load mm genome for annotation
+mm <- org.Mm.eg.db
+# Set random seed for reproducibility
+set.seed(42)
+```
+
+### Define variables and function for rounding thesis tables
+```{r}
+# Round numeric columns to 3 sig.digits
+sig.digits <- 3
+# Create a function that determines when to use which type of rounding in a data.frame
+pref.round <- function(x) {
+  if (is.numeric(x)) {
+    ifelse(
+      x %% 1 == 0,  # Skip rounding for whole numbers
+      x,
+      ifelse(
+        abs(x) < 0.1,  # Use scientific notation for abs(x) < 0.1
+        formatC(x, format = "e", digits = sig.digits),
+        formatC(x, format = "f", digits = sig.digits)  # Use fixed-point otherwise
+      )
+    )
+  } else {
+    x  # Return non-numeric values as-is
+  }
+}
+```
+
+### Load pre-processed das data
+```{r}
+das.dat <- readRDS("~/R/sc-seq_mouse/2_output/das_dat_processed.RDS")
+```
+
+### Load all data from Conor
+```{r}
+# CV.all.dat <- readRDS("~/R/sc-seq_mouse/data/CV_mice_dat_annotated.RDS")
+```
+
+### Subset data into only epithelial cells for subclustering
+```{r}
+# Pull out the appropriate cell types, including the undetermined cells as they may represent cancer
+das.dat.epithelial <- subset(das.dat, idents =  c("Parietal Cells", "Chief Cells", "Mucous Cells", "Proliferating Epithelial Cells", "Pit Cells", "Undetermined"))
+
+# Confirm that the subsetting worked
+das.dat.epithelial@meta.data[["type.manual.v1"]] %>% table()
+das.dat@meta.data[["type.manual.v1"]] %>% table()
+
+# View the clustering retained from the larger dataset (obviously not true once downstream analysis has been run)
+DimPlot(das.dat.epithelial, label = T)
+
+# Add metadata defining Cdh1 expression per cell
+# Extract expression data for Cdh1
+cdh1.expression <- FetchData(das.dat.epithelial, vars = "Cdh1")
+# Add the annotation based on Cdh1 expression as a new metadata column
+das.dat.epithelial$cdh1.expression <- ifelse(cdh1.expression$Cdh1 > 0, "some", "none")
+# Verify the addition
+head(das.dat.epithelial@meta.data)
+
+# Tidy up the environment
+rm(cdh1.expression)
+```
+
+# Seurat on Epithelial Cells
+### Carry out the Seurat workflow on only these cells to create new, higher resolution clusters
+```{r}
+# Found notes online indicating to re-run everything except NormalizeData, as the data is already normalised (in the "data" element of the SeuratObject)
+# das.dat.epithelial <- NormalizeData(object = das.dat.epithelial)
+# Same parameters as larger dataset
+das.dat.epithelial <- FindVariableFeatures(object = das.dat.epithelial, selection.method = "vst", nfeatures = 2000)
+# Same parameters
+all.genes <- rownames(das.dat.epithelial)
+das.dat.epithelial <- ScaleData(object = das.dat.epithelial, features = all.genes)
+# Same parameters
+das.dat.epithelial <- RunPCA(object = das.dat.epithelial, features = VariableFeatures(object = das.dat.epithelial))
+# Look for the elbow to determine how many PCs to use downstream
+ElbowPlot(das.dat, ndims = 50)
+# Using 12 PCs now
+das.dat.epithelial <- FindNeighbors(object = das.dat.epithelial, dims = 1:12)
+# Find at all resolutions, same parameters
+das.dat.epithelial <- FindClusters(object = das.dat.epithelial, resolution = seq(0.1,1,length=10))
+# Still using 12 PCs
+das.dat.epithelial <- RunUMAP(object = das.dat.epithelial, dims = 1:12)
+
+# Tidy up the environment
+rm(all.genes)
+```
+
+### Look at the phylogeny of the data with clustree, to determine which resolution to use
+```{r}
+# Plot clustree
+plot.clustree <- clustree(das.dat.epithelial, show_axis = T) + NoLegend() + ylab("Seurat clustering resolution")
+# Output in this chunk
+plot.clustree
+# Save plot
+png(filename = "3_output/clustree.png", width = 2000, height = 1000, units = "px", res = 150)
+plot.clustree
+dev.off()
+
+# Plot clusters by treat ident
+DimPlot(object = das.dat.epithelial, label = T, split.by = "treat.ident")
+table(das.dat.epithelial@meta.data[["seurat_clusters"]])
+# Define what resolution you want to use for further analysis
+# Define which resolution we want to use to define our "seurat_clusters" and idents, which are used in the following code
+# Using high resolution to capture the most variation - aside from making a tiny tiny cluster 10, so 0.9.
+das.dat.epithelial@meta.data[["seurat_clusters"]] <- das.dat.epithelial@meta.data[["RNA_snn_res.0.9"]]
+Idents(das.dat.epithelial) <- das.dat.epithelial@meta.data[["RNA_snn_res.0.9"]]
+```
+
+### Find marker genes and annotate cell types
+```{r}
+# Ensure active idents are correct
+Idents(das.dat.epithelial) <- das.dat.epithelial@meta.data[["seurat_clusters"]]
+
+# Find markers with Seurat
+das.markers.epithelial <- FindAllMarkers(das.dat.epithelial, only.pos = TRUE, min.pct = 0.25, logfc.threshold = 0.25) %>% .[order(.$avg_log2FC, decreasing = TRUE ),]
+
+# Write a loop to pull out markers for individual clusters as separate objects
+# Create empty list
+das.markers.epithelial.list <- list()
+# Fill list
+for(i in levels(das.markers.epithelial$cluster)){
+  das.markers.epithelial.list[[i]] <- das.markers.epithelial %>% 
+    group_by(cluster) %>% 
+    filter(cluster == i)
+  # Rename data.frame columns within list
+  names(das.markers.epithelial.list[[i]]) <- colnames(das.markers.epithelial)
+}
+
+# Print the top 5 markers for each cluster
+for(i in 1:length(das.markers.epithelial.list)){
+  das.markers.epithelial.list[[i]] %>% head(., n = 5) %>% print(.)
+}
+
+# Put the top 5 markers from each cluster into a new data frame for easier viewing and annotation
+das.markers.epithelial.top5.list <- lapply(das.markers.epithelial.list, function(df) head(df, 5))
+# Use do.call to combine the list of data frames into a single data frame
+das.markers.epithelial.top5.data.frame <- do.call(rbind, das.markers.epithelial.top5.list)
+# If you want to reset row names in the combined data frame
+# rownames(combined_data) <- NULL
+# Now 'das.markers.epithelial.top5.data.frame' contains the first 5 rows of each data frame
+
+# Export cluster markers for thesis
+wb <- createWorkbook()
+# Loop through the list and add each element as a sheet
+for (name in names(das.markers.epithelial.list)) {
+  addWorksheet(wb, name)  # Create a worksheet with the list element name
+  writeData(wb, sheet = name, x = das.markers.epithelial.list[[name]])  # Write data to the sheet
+}
+# Save the workbook
+saveWorkbook(wb, "3_output/epithelial_subcluster_markers.xlsx", overwrite = TRUE)
+
+# Tidy up the environment
+rm(list = c("das.markers.epithelial", "i", "wb"))
+
+# Reset the active idents (just in case)
+Idents(das.dat.epithelial) <- das.dat.epithelial@meta.data[["seurat_clusters"]]
+```
+
+### Visualise clusters with different marker genes
+```{r}
+# Ensure active idents are correct
+Idents(das.dat.epithelial) <- das.dat.epithelial@meta.data[["seurat_clusters"]]
+
+# Plot to see clusters in relation to one another
+plot.epithelial.treat.ident <- DimPlot(das.dat.epithelial, reduction = "umap", label = T, repel = T, split.by = "treat.ident")
+# Output plot in chunk
+plot.epithelial.treat.ident
+# Save plot
+png(filename = "3_output/seurat_cluster_by_treat.ident.png", width = 1500, height = 1000, units = "px")
+plot.epithelial.treat.ident
+dev.off()
+
+# Look at some obvious features you can think of
+FeaturePlot(object = das.dat.epithelial, features = c("Mki67", "Top2a", "Nme1", "Myc"))
+FeaturePlot(object = das.dat.epithelial, features = c("Ctnnb1", "Myc", "Lgr4"))
+# Table to see proportion of cells in each cluster across the dataset
+table(das.dat.epithelial@meta.data[["seurat_clusters"]]) %>% prop.table()
+
+
+# References for marker genes
+# Dong et al. 2023: https://www.ncbi.nlm.nih.gov/pmc/articles/PMC10319429/
+# Takada et al. 2023: https://www.nature.com/articles/s41467-023-39113-0
+# Miao et al. 2014: https://www.sciencedirect.com/science/article/abs/pii/S2210776214000416
+# Gemenetzidis et al. 2010: https://www.ncbi.nlm.nih.gov/pmc/articles/PMC3044465/
+
+
+# Plotting markers from Dong et al's 2023 paper
+# "Surface" cells
+VlnPlot(das.dat.epithelial, features = c("Myc", "Fosl1", "Ccnd1"))
+# "Progenitor" markers
+VlnPlot(das.dat.epithelial, features = c("Fabp5", "Nme1", "Myc"))
+# "Cycling Progenitor" markers (Also Hmgb2 but it's not in the dataset)
+VlnPlot(object = das.dat.epithelial, features = c("Top2a", "Mki67", "Fabp5"))
+# "Pre-neck" markers
+VlnPlot(object = das.dat.epithelial,features = c("Lyz1", "Clu", "Muc6", "Pgc", "Id1"))
+# "Neck" markers
+VlnPlot(object = das.dat.epithelial, features = c("Muc6", "Pga4", "Pga3", "Lipf"))
+# "Chief" markers - also Cblif, identified in Takada et al 2023 as a chief cell marker, and expressed way higher in cluster 2.
+VlnPlot(object = das.dat.epithelial, features = c("Pga5", "Pgc", "Pga3", "Lipf"))
+VlnPlot(object = das.dat.epithelial, features = c("Cblif"))
+# "Parietal" markers
+VlnPlot(object = das.dat.epithelial, features = c("Atp4a", "Atb4b", "Ckb", "Idh2"))
+# "Enteroendocrine" markers
+VlnPlot(object = das.dat.epithelial, features = c("Chga", "Ms4a8", "Scg3", "Scg5"))
+# Dong et al's proof of Wnt pathway activity
+VlnPlot(das.dat.epithelial, features = c("Myc", "Fosl1", "Ccnd1"))
+# Dong et al's "Lgr4 potentially plays a critical role in corpus epithelial stem/progenitor cells"
+VlnPlot(das.dat.epithelial, features = c("Lgr4", "Lgr5"))
+# From their second scRNA-seq dataset
+# TF's that are expressed specifically in progenitor 1 cluster
+VlnPlot(das.dat.epithelial, features = c("Id1", "Klf2", "Klf6", "Atf3", "Elf3", "Myc"))
+# TF's that are expressed specifically in their progenitor 2 cluster
+VlnPlot(das.dat.epithelial, features = c("Brca1"))
+# Marker genes of the base stem cells
+VlnPlot(das.dat.epithelial, features = c("Lgr5", "Tnfrsf19"))
+# Previously reported stem cell markers identified by lineage-tracing studies in mice
+VlnPlot(das.dat.epithelial, features = c("Lgr5", "Lrig1", "Aqp5", "Cckbr", "Tnfrsf19", "Vil1", "Sox2", "Esr1"))
+
+
+# Takada et al. 2023's relevant genes
+# Single-cell transcriptomics uncovers EGFR signaling-mediated gastric progenitor cell differentiation in stomach homeostasis
+# Noggin, whose overexpression reduces parietal cell counts and increases number of proliferating and transitional cells
+# Tgf alpha, whose overexpression induces hyperplasia of surface pit cells and depletion of parietal cells and chief cells
+VlnPlot(das.dat.epithelial, features = c("Nog", "Tgfa"))
+# Mature pit cell specific marker (Aqp3), pan pit cell marker (Gkn2), corpus pit cell-specific markers (Sctr, Basp1), and antrum pit cell-specific markers (Krt7, Krt20)
+VlnPlot(das.dat.epithelial, features = c("Aqp3", "Gkn2", "Sctr", "Basp1", "Krt7", "Krt20"))
+# Previously identified isthmus stem cell markers (not so much Iqgap1)
+VlnPlot(das.dat.epithelial, features = c("Stmn1", "Iqgap1", "Iqgap3"))
+# Other stem cell markers
+VlnPlot(das.dat.epithelial, features = c("Tcf19", "Hmg2"))
+
+
+# Laminins and Integrins:
+# Came up in phase 1 bioinformatics (there are far more integrins than it's feasible to plot, so only 1-3)
+VlnPlot(das.dat.epithelial, features = c("Lama1", "Lama2", "Lama3"))
+VlnPlot(das.dat.epithelial, features = c("Lamb1", "Lamb2", "Lamb3"))
+VlnPlot(das.dat.epithelial, features = c("Lamc1", "Lamc2", "Lamc3"))
+VlnPlot(das.dat.epithelial, features = c("Itga1", "Itga2", "Itga3"))
+VlnPlot(das.dat.epithelial, features = c("Itgb1", "Itgb2", "Itgb3"))
+# Some other interesting integrin subunits
+VlnPlot(das.dat.epithelial, features = c("Itgav", "Itga5", "Itgb6"))
+
+
+# Developing a theory
+# Clusters 3 and 4 are very similar, definitely progenitor cells. However, cluster 4 has some quite different gene expression. This may be because it's going through the cell cycle (it expresses many of Dong et al 2023's markers for this, Top2a and Mki67), but it could also be developing early cancer.
+# Foxm1 stimulates progression through the cell cycle (Takada et al. 2023), but also may have a role in EMT in GC (Miao et al. 2014), upregulating Zeb1, Zeb2, Vim, and down-regulating Cdh1. There's some evidence that Foxm1 is involved in epithelial progenitor expansion leading to cancer (Gemenetzidis et al. 2011)
+# Same paper also suggest Foxm1 down = NF-κB p65 subunit, cyclin D1, Hes-1, VEGF, and EpCAM protein down.
+# Nothing is going on in the hedgehog pathway (Shh, Ihh, Hh), despite some of the literature around this.
+# Twist1 isn't strongly expressed anywhere, despite some evidence that it upregulates Foxm1 in GC https://journals.plos.org/plosone/article?id=10.1371/journal.pone.0077625
+# Some evidence that Foxm1 upregulates Ctsd, which then downregulates Cdh1, but there's no Ctsd expression in cluster 4 here https://pubmed.ncbi.nlm.nih.gov/28978107/
+# CLuster 4 also expresses high amounts of Top2a and Mki67 compared to other cells
+# In our data, Zeb1 and Zeb2 are pretty unclear, but there's definitely more vimentin. Vimentin is the major cytoskeletal component of mesenchymal cells, but also is just in mitosis?
+
+
+# EMT:
+VlnPlot(das.dat.epithelial, features = c("Foxm1", "Cdh1", "Zeb1", "Zeb2", "Vim"))
+# These are markers of EMT from google: negative (Cdh1 and cytokeratins) and positive (vimentin, N-cadherin (Cdh2), fibronectin), plotted alongside Foxm1 for comparison.
+# Not much going on here in anything except vimentin.
+VlnPlot(das.dat.epithelial, features = c("Foxm1", "Cdh1", "Vim", "Cdh2", "Fn1"))
+# Markers of EMT from https://www.ncbi.nlm.nih.gov/pmc/articles/PMC2689132/ ...
+# Cell surface proteins (some of these have multiple subunits so I've just picked one to plot, Cdh1 and Tjp1 are attenuated, the rest are acquired)
+VlnPlot(das.dat.epithelial, features = c("Cdh2", "Cdh11", "Itga5", "Itgb6", "Sdc1", "Cdh1", "Tjp1"))
+# Cytoskeletal markers (Krt14 is attenuated, the ref just says cytokeratin)
+VlnPlot(das.dat.epithelial, features = c("S100a4", "Acta2", "Vim", "Ctnnb1", "Krt14"))
+# ECM proteins (Col4a1 and Lama1 are attenuated)
+VlnPlot(das.dat.epithelial, features = c("Col1a1", "Col3a1", "Fn1", "Lama5", "Col4a1", "Lama1"))
+# Transcription factors
+VlnPlot(das.dat.epithelial, features = c("Snai1", "Snai2", "Zeb1", "Runx2", "Trim28", "Twist1", "Lef1", "Ets1", "Foxc2", "Gsc"))
+# MicroRNAs (Mir-200 family is allegedy an attenuated marker). These aren't in the dataset
+# VlnPlot(das.dat.epithelial, features = c("Mir10b","Mir21", "Mir200"))
+# GC specific EMT markers https://www.ncbi.nlm.nih.gov/pmc/articles/PMC4697696/
+# Snail downregulates Cdh1. Mesenchymal-related genes (WNT5A, CDH2, PDGFRB, EDNRA, ROBO1, ROR2, and MEF2C) are activated by Zeb2, an EMT regulator
+# Nothing really going on with any of these either
+VlnPlot(das.dat.epithelial, features = c("Foxm1","Snai1", "Wnt5a", "Cdh2", "Pdgfrb", "Ednra", "Robo1", "Ror2", "Mef2c", "Zeb2"))
+# EMT signature from Conor
+VlnPlot(das.dat.epithelial, features = c("Snai1", "Snai2", "Twist1", "Zeb1", "Zeb2", "Cdh1", "Cldn4", "Cldn7", "Tjp3", "Muc1"))
+# Simplest illustration of the genes that look good
+VlnPlot(das.dat.epithelial, features = c("Foxm1", "Cdh1", "Vim"))
+# DDR2 activity and EMT, from Nic's Das paper https://www.ncbi.nlm.nih.gov/pmc/articles/PMC8996982/
+VlnPlot(das.dat.epithelial, features = c("Ddr1", "Ddr2"), split.by = "treat.ident")
+
+
+# Other things we might expect to be different based on what we know of Dasatinib
+VlnPlot(das.dat.epithelial, features = c("Pik3r1", "Src", "Akt1", "Akt2"), split.by = "treat.ident")
+
+
+# Runx2 information from https://www.frontiersin.org/journals/oncology/articles/10.3389/fonc.2023.1133476/full
+# More here https://www.mdpi.com/1422-0067/24/8/7001
+# and here https://onlinelibrary.wiley.com/doi/full/10.1111/cas.15045
+# RUNX2 has been shown to promote malignant progression in gastric cancer by regulating COL1A1, YAP1 and FN1 expression.
+# RUNX2 activates the transcription of MGAT5 and MMP13
+VlnPlot(das.dat.epithelial, features = c("Runx2", "Col1a1", "Yap1", "Fn1", "Mgat5", "Mmp13"))
+
+
+# Sox2 interactions and other stem cell markers (Also Oct3/4 but missing from the data):
+VlnPlot(das.dat.epithelial, features = c("Sox2", "Lif", "Nanog", "Pax6", "Npm1"))
+VlnPlot(das.dat.epithelial, features = c("Ctnnb1"), split.by = "treat.ident")
+
+# Markers of hormone secreting cells according to Liabeuf et al. 2022 (and their ref no. 28). Also serotonin in enterochromaffin cells
+# Sst: somatostatin, D cells;  Gast: gastrin, G cells; Ghrl: ghrelin, X cells; Dclk1: Doublecortin-like kinase, tuft cells
+# Also Chga, enteroendocrine cells - but these should have mostly been found in 2_sc-seq_dasatinib
+VlnPlot(das.dat.epithelial, features = c("Sst", "Gast", "Ghrl", "Dclk1", "Chga"))
+
+
+# Reset the active idents (just in case)
+Idents(das.dat.epithelial) <- das.dat.epithelial@meta.data[["seurat_clusters"]]
+```
+
+### Visualise treatment groups with different marker genes
+```{r}
+# Ensure active idents are correct
+Idents(das.dat.epithelial) <- das.dat.epithelial@meta.data[["seurat_clusters"]]
+
+# Not really sure what these genes were for
+testplots <- VlnPlot(das.dat.epithelial, features = c("Clu", "Pgc", "Col1a1", "Col2a1", "Col3a1", "Igfbp7", "Sparc", "Xbp1", "Itga5"))
+grid.arrange(testplots[[1]], testplots[[2]], top = "Mystery Genes")
+
+
+# Itga5 https://www.sciencedirect.com/science/article/pii/S0344033819307332?
+VlnPlot(das.dat.epithelial, features = "Itga5", split.by = "treat.ident")
+
+
+# Testing genes from papers that may be drug targets
+VlnPlot(das.dat.epithelial, features = "Aldh3a1", split.by = "treat.ident")
+VlnPlot(das.dat.epithelial, features = "Aldh3a1")
+# Aldh3a1 https://www.nature.com/articles/s41598-019-52814-1 doesn't do anything interesting in the cancer cells
+VlnPlot(das.dat.epithelial, features = "Vdac1")
+VlnPlot(das.dat.epithelial, features = "Vdac1", split.by = "treat.ident")
+# Vdac1 (porin) https://www.hindawi.com/journals/omcl/2017/1320241 may be a little bit down after treatment, but not really interesting or especially high in cancer cluster 
+
+
+# Transitional cells, which are transdifferentiating from Mucous to Chief cells, express both Mucous and Chief Markers
+# https://www.ncbi.nlm.nih.gov/pmc/articles/PMC3210373/
+# https://journals.biologists.com/dev/article/134/1/211/52747/The-maturation-of-mucus-secreting-gastric
+VlnPlot(das.dat.epithelial, features = c("Pgc", "Cblif", "Bhlha15", "Gkn3", "Tff2", "Muc6"))
+
+
+# Check out clusterin differential expression
+# https://www.ncbi.nlm.nih.gov/pmc/articles/PMC6367548/
+VlnPlot(das.dat.epithelial, features = c("Clu", "Hsp90ab1"), split.by = "treat.ident")
+
+
+# Check out Ets-1 cause it's mentioned here https://www.ncbi.nlm.nih.gov/pmc/articles/PMC6896088/figure/cancers-11-01775-f001/ and I think came up somewhere? From that paper it looks like inhibiting PI3K/AKT reduces Ets-1 expression
+VlnPlot(das.dat.epithelial, features = c("Ets1"), split.by = "treat.ident")
+
+
+# Verteporfin reduces CD44 expression, and inhibits Fat1 and/or Yap1. (Taz is wrong here)
+VlnPlot(das.dat.epithelial, features = c("Cd44", "Fat1", "Yap1", "Taz"), split.by = "treat.ident")
+# In GC cell lines, verteporfin was effective. https://www.ncbi.nlm.nih.gov/pmc/articles/PMC5716775/ Known DE downstream targets involved in tumorigenesis included Fat1, Igf2r, Muc1, Alcam, Itgb1, Erbb3, and Itga5
+VlnPlot(das.dat.epithelial, features = c("Fat1", "Igf2r", "Muc1", "Alcam", "Itgb1", "Erbb3", "Itga5"), split.by = "treat.ident")
+
+
+# FLT3 inhibitors include Sorafenib, but it doesn't look like there's much FLT3 mutation in GC or DGC
+VlnPlot(das.dat.epithelial, features = c("Flt3"))
+
+
+# Sox2 DE? Notum in same paper but doesn't look exciting https://link.springer.com/article/10.1007/s13402-023-00875-w
+VlnPlot(das.dat.epithelial, features = c("Sox2", "Notum"), split.by = "treat.ident")
+
+
+# PDL1 expression - too low to interpret
+VlnPlot(das.dat.epithelial, features = "Cd274", split.by = "treat.ident")
+
+
+# Rho family genes for drug discovery from https://www.ncbi.nlm.nih.gov/pmc/articles/PMC7007383/
+# Ptk2 = FAK
+VlnPlot(das.dat.epithelial, features = c("Rhoa", "Rock1", "Ptk2"))
+VlnPlot(das.dat.epithelial, features = c("Rhoa", "Rock1", "Ptk2"), split.by = "treat.ident")
+
+
+# Ntrk's for TRAK inhibition - barely picked up any, too low to quantify
+VlnPlot(das.dat.epithelial, features = c("Ntrk1", "Ntrk2", "Ntrk3"), split.by = "treat.ident")
+
+
+# Wnt signalling
+VlnPlot(das.dat.epithelial, features = c("Wnt1", "Wnt3a", "Wnt5a", "Frzb", "Fzd1", "Csnk1a1", "Gsk3b"))
+VlnPlot(das.dat.epithelial, features = c("Fzd1"), split.by = "treat.ident")
+
+
+# FGFR Signaling - Fgfr4 is up in cancer cells, and looks a little bit up after das treatment. Fgfr2 is more implicated in GC, but not highly expressed enough to interpret.
+VlnPlot(das.dat.epithelial, features = c("Fgfr1", "Fgfr2", "Fgfr3", "Fgfr4"))
+VlnPlot(das.dat.epithelial, features = c("Fgfr4"), split.by = "treat.ident")
+# FGF10 and FGF18 are implicated in GC https://www.mdpi.com/2073-4409/8/6/637
+VlnPlot(das.dat.epithelial, features = c("Fgf10", "Fgf18"))
+
+
+# Yap/Hippo and B-Cat/Wnt Signalling Pathways:
+# Yap1 looks up in das treated cancer, which flows in to a lot of the potential targets we've been looking at
+VlnPlot(das.dat.epithelial, features = c("Yap1"), split.by = "treat.ident")
+VlnPlot(das.dat.epithelial, features = c("Notum"), split.by = "treat.ident")
+# After talking to Sefi Rosenbluh at genemappers, look at some genes related to the Yap/Hippo and b-Cat/Wnt pathways
+# Ccn1 (Cyr61) and Ccn2 (Ctgf) for Yap/Hippo, #Axin2 for Wnt
+VlnPlot(das.dat.epithelial, features = c("Ccn1", "Ccn2", "Axin2"), split.by = "treat.ident")
+# Genes in APC complex that work with Axin2 in B-catenin signalling
+VlnPlot(das.dat.epithelial, features = c("Tnks"), split.by = "samp.ident.plain")
+VlnPlot(das.dat.epithelial, features = c("Terf1"), split.by = "samp.ident.plain")
+VlnPlot(das.dat.epithelial, features = c("Apc"), split.by = "samp.ident.plain")
+# Look at Gsk3b, Yes1, and Yap1 for related reasons
+VlnPlot(das.dat.epithelial, features = c("Gsk3b", "Yes1", "Yap1"), split.by = "treat.ident")
+# Yes1, Src, and Abl all phosphorylate Yap1
+# From Sefi's paper b-Catenin-Driven Cancers Require a YAP1 Transcriptional Complex for Survival and Tumorigenesis
+
+# Checking entire Ccn family as Ccn1 and Ccn3 should be up in gastric cancer https://pubmed.ncbi.nlm.nih.gov/27633176/
+VlnPlot(das.dat.epithelial, features = c("Ccn1", "Ccn2", "Ccn3"), split.by = "treat.ident")
+VlnPlot(das.dat.epithelial, features = c("Ccn4", "Ccn5", "Ccn6"), split.by = "treat.ident")
+# Looks like we only pick up Ccn1 and Ccn2 though
+
+
+# Genes from Chella and her paper
+VlnPlot(das.dat.epithelial, features = c("Cd44", "Sfrp2", "Thy1", "Thbs4", "Il1r1"), split.by = "treat.ident") + plot_annotation(title = "Chella genes")
+VlnPlot(das.dat.epithelial, features = c("Cxcl14", "Il1r2", "Oasl1", "Fgf8", "Adm", "Hpgd", "Apoa4", "Mef2c"), split.by = "treat.ident") + plot_annotation(title = "Chella genes up in SRCC vs poorly differentiated")
+VlnPlot(das.dat.epithelial, features = c("Ceacam3", "Ceacam6"), split.by = "treat.ident") + plot_annotation(title = "Chella genes up in poorly differentiated vs SRCC")
+
+
+# Compare between the two treatments:
+Idents(das.dat.epithelial) <- das.dat.epithelial@meta.data$treat.ident
+VlnPlot(das.dat.epithelial, features = c("Yes1", "Src", "Abl1"))
+# Compare expression of all genes between Sample1 and Sample2 (kinda like non-pseuedo-bulked DE analysis on the entire sample, but probably even less robust)
+epithelial.control.vs.drug.markers <- FindMarkers(das.dat.epithelial, ident.1 = "Das - control", ident.2 = "Das - drug")
+# Plot genes from the epithelial.control.vs.drug.markers test
+# These are all Oas family genes, which is involved in the innate immune response
+VlnPlot(das.dat.epithelial, features = c("Oas1a", "Oas1g", "Oas2", "Oasl2", "Oas3"))
+# Plot them again, but by mouse
+Idents(das.dat.epithelial) <- das.dat.epithelial@meta.data$samp.ident.plain
+VlnPlot(das.dat.epithelial, features = c("Oas1a", "Oas1g", "Oas2", "Oasl2", "Oas3"))
+
+# Are these genes up in response to interferon-gamma signalling in this mouse?
+VlnPlot(das.dat.epithelial, features = c("Ifng", "Ifngr1", "Tlr2", "Tlr4"))
+# Doesn't look like it at least
+# What about interferon alpha or gamma?
+
+
+# Are these being driven by any one particular mouse?
+# Set idents back to cell type
+Idents(das.dat.epithelial) <- das.dat.epithelial@meta.data$type.manual.v1
+# Check these genes across sample to see if they're sample driven rather than treatment drive
+VlnPlot(das.dat.epithelial, features = c("Ccn1"), split.by = "samp.ident.plain")
+VlnPlot(das.dat.epithelial, features = c("Ccn2"), split.by = "samp.ident.plain")
+VlnPlot(das.dat.epithelial, features = c("Axin2"), split.by = "samp.ident.plain")
+VlnPlot(das.dat.epithelial, features = c("Gsk3b"), split.by = "samp.ident.plain")
+VlnPlot(das.dat.epithelial, features = c("Yes1"), split.by = "samp.ident.plain")
+VlnPlot(das.dat.epithelial, features = c("Yap1"), split.by = "samp.ident.plain")
+VlnPlot(das.dat.epithelial, features = c("Tbx5"), split.by = "samp.ident.plain")
+# No thankfully
+
+# Back to trying to figure these genes out
+VlnPlot(das.dat.epithelial, features = c("Oas1a"), split.by = "samp.ident.plain")
+VlnPlot(das.dat.epithelial, features = c("Oas2"), split.by = "samp.ident.plain")
+# Oas expression is apparently linked to interferon beta signalling (ChatGPT, haven't got a real source yet)
+VlnPlot(das.dat.epithelial, features = c("Ifnb1"), split.by = "samp.ident.plain")
+
+# Tidy up the environment
+rm(list = c("testplots"))
+# Reset the active idents just in case
+Idents(das.dat.epithelial) <- das.dat.epithelial@meta.data[["seurat_clusters"]]
+```
+
+## Visualise final features that inform cluster annotation
+```{r}
+# Ensure active idents are correct
+Idents(das.dat.epithelial) <- das.dat.epithelial@meta.data[["seurat_clusters"]]
+
+# Plot figures for cell type identification
+interesting.features <- c("Cdh1", "Mki67", "Top2a", "Lama3", "Lamb2", "Itga2", "Itga3", "Cldn4", "Cldn7", "Lrig1", "Foxm1", "Sox2", "Clu")
+VlnPlot(das.dat.epithelial, features = interesting.features) + plot_annotation(title = "Interesting Features")
+chief.features <- c("Pgc", "Cblif", "Bhlha15")
+VlnPlot(das.dat.epithelial, features = chief.features) + plot_annotation(title = "Chief Cell Markers")
+mucous.features <- c("Muc6", "Tff2", "Cd44", "Gkn3")
+VlnPlot(das.dat.epithelial, features = mucous.features) + plot_annotation(title = "Mucous Cell Markers")
+pit.features <- c("Muc5ac", "Gkn1", "Gkn2", "Tff1", "Krt7", "Krt20", "Sctr")
+VlnPlot(das.dat.epithelial, features = pit.features) + plot_annotation(title = "Pit Cell Markers")
+parietal.features <- c("Atp4a", "Atp4b", "Ckb", "Idh2")
+VlnPlot(das.dat.epithelial, features = parietal.features) + plot_annotation(title = "Parietal Cell Markers")
+
+
+# Misc stuff
+FeaturePlot(das.dat.epithelial, features = c("Runx1", "Runx2", "Runx3"), split.by = "treat.ident")
+VlnPlot(das.dat.epithelial, features = c("Runx1", "Runx2"))
+VlnPlot(das.dat.epithelial, features = "Cdh1", split.by = "treat.ident")
+# Downregulation of Foxm1 leads to inhibition of EMT? https://www.sciencedirect.com/science/article/abs/pii/S2210776214000416
+VlnPlot(das.dat.epithelial, features = "Foxm1", split.by = "treat.ident")
+# From the same paper, more Foxm1 = more mesenchymal markers like vimentin. Looks like there's less vim everywhere in the das treated, so does that mean das is reducing the prevalence of EMT in all of these cell types?
+VlnPlot(das.dat.epithelial, features = "Vim", split.by = "treat.ident")
+# Foxm1 and Plau positive cells are enriched in Tgf-beta, DNA repair, and drug resistance pathways. Paper suggest drugs that could target these https://www.ncbi.nlm.nih.gov/pmc/articles/PMC6959008/
+VlnPlot(das.dat.epithelial, features = c("Foxm1", "Tgfb1"), split.by = "treat.ident")
+
+
+# Trying to find some kind of inflammation or immune response markers
+VlnPlot(das.dat.epithelial, features = "Nfkb1", split.by = "treat.ident")
+VlnPlot(das.dat.epithelial, features = "Icam1", split.by = "treat.ident")
+# Cytokines IL-6, INF-γ, IL-4 and IL-22 aren't classical  but were expressed slightly more in inflammation https://bmcmicrobiol.biomedcentral.com/articles/10.1186/s12866-015-0400-1 Lcn2 is a marker of early inflammation
+VlnPlot(das.dat.epithelial, features = c("Il6", "Ifng", "Il4", "Il22", "Lcn2")) + plot_annotation(title = "Inflammation Markers")
+VlnPlot(das.dat, features = c("Il6", "Ifng", "Il4", "Il22", "Lcn2")) + plot_annotation(title = "Inflammation Markers")
+# Cldn4, Cdh1, F11r, Occludin, ZO1 (Tjp1, a zonular occludin) were less abundant in the inflammation treated mice
+# These are mostly tight junction genes
+VlnPlot(das.dat.epithelial, features = c("Cldn4", "Cdh1", "F11r", "Ocln", "Tjp1"), split.by = "treat.ident")
+# Cldn1, Cldn2, Cldn5, Cldn15 were unaffected
+VlnPlot(das.dat.epithelial, features = c("Cldn1", "Cldn2", "Cldn5", "Cldn15"), split.by = "treat.ident")
+# TNF alpha and interferon gamma are pro-inflammatory cytokines https://pubmed.ncbi.nlm.nih.gov/17216105/
+VlnPlot(das.dat.epithelial, features = c("Tnf", "Ifng"), split.by = "treat.ident")
+# C reactive protein citation: Sera
+VlnPlot(das.dat.epithelial, features = "Crp", split.by = "treat.ident")
+# IL8 citation: Conor
+VlnPlot(das.dat.epithelial, features = "Cxcl15", split.by = "treat.ident")
+# Cd45 (Cla), expressed in most immune cells but not all - Kate
+VlnPlot(das.dat, features = "Ptprc", split.by = "treat.ident")
+VlnPlot(das.dat.epithelial, features = "Ptprc", split.by = "treat.ident")
+# Inflammation markers that show a difference
+VlnPlot(das.dat, features = c("Nfkb1", "Icam1", "F11r", "Tjp1", "Tnf", "Ptprc"), split.by = "treat.ident") + plot_annotation(title = "Inflammation and similar markers (that are interesting)")
+VlnPlot(das.dat.epithelial, features = c("Nfkb1", "Icam1", "F11r", "Tjp1", "Tnf", "Ptprc"), split.by = "treat.ident") + plot_annotation(title = "More inflammation and similar markers (that are interesting)")
+# Notes on these - F11r is a tight junction protein. https://www.ncbi.nlm.nih.gov/gene/50848 As is Tjp1
+
+
+# Claudins:
+# Cldn18 is a potential drug target in GS TCGA gastric cancer subtype. It's high in proliferating cells 1, but not higher than in other clusters. Doesn't show much cross treatment difference, only in undetermined (very few cells) and maybe pit cells.
+VlnPlot(das.dat.epithelial, features = "Cldn18", split.by = "treat.ident")
+# Explore other claudin genes. 1-4 have been implicated in GC, specifically 3 and 4 https://www.sciencedirect.com/science/article/pii/S002248041000106X, Cdx2 regulates claudins
+VlnPlot(das.dat.epithelial, features = c("Cldn1", "Cldn2", "Cldn3", "Cldn4", "Cdx2", "Muc2")) + plot_annotation(title = "Cldn family genes (esp. Cldn3 and Cldn4) are implicated in GC")
+VlnPlot(das.dat.epithelial, features = c("Cldn2", "Cldn3", "Cldn4"), split.by = "treat.ident")  + plot_annotation(title = "Cldn family genes (esp. Cldn3 and Cldn4) are implicated in GC")
+# Not a huge amount of difference between treatment types, but still interesting that they are only really expressed in one cluster.
+# Explore basically the entire Claudin family for reference. Between 1-24, only 2,3,4,7,8,12,18, and 23 had enough expression to make any conclusions.
+VlnPlot(das.dat.epithelial, features = c("Cldn7", "Cldn8", "Cldn12"), split.by = "treat.ident")
+VlnPlot(das.dat.epithelial, features = c("Cldn18", "Cldn23"), split.by = "treat.ident")
+
+
+# Gastric stem cell markers https://www.gastrojournal.org/article/S0016-5085(21)04088-9/fulltext
+# This paper also has a much more thorough list in Table 1, looks like a lot of genes that you've already looked at though
+VlnPlot(das.dat.epithelial, features = c("Lgr5", "Axin2", "Aqp5")) + plot_annotation(title = "Gastric Stem Cell Markers (not final)")
+
+VlnPlot(das.dat.epithelial, features = c("Cckbr")) + plot_annotation(title = "Gastric Stem Cell Markers (not final)")
+
+# Antral isthmus stem cell markers from the same paper (again, Bhlha15 = Mist1)
+VlnPlot(das.dat.epithelial, features = c("Bmi1", "Bhlha15")) + plot_annotation(title = "Antral Isthmus Stem Cell Markers (not final)")
+
+rm(list = c("interesting.features", "chief.features", "mucous.features", "pit.features", "parietal.features"))
+```
+
+### Plots with median lines and Sefi's genes by Cdh1 expression, as well as some misc stuff
+```{r}
+# Ensure active idents are correct
+Idents(das.dat.epithelial) <- das.dat.epithelial@meta.data[["seurat_clusters"]]
+
+# Code that adds a line at the median for violin
+VlnPlot(das.dat.epithelial, features = c("Cdh1"), split.by = "treat.ident") + stat_summary(fun = median, geom = "crossbar", 
+                                                                                           position = position_dodge(width = 0.9), 
+                                                                                           width = 0.25, color = "black", linewidth = 0.5)
+
+# Look at the expression of Wnt/B-catenin related genes by Cdh1 expression level
+Idents(das.dat.epithelial) <- das.dat.epithelial@meta.data[["cdh1.expression"]]
+
+# Sefi genes by treat identity
+VlnPlot(das.dat.epithelial, features = c("Ccn1", "Ccn2", "Axin2"), split.by = "treat.ident") + stat_summary(fun = median, geom = "crossbar", 
+                                                                                                            position = position_dodge(width = 0.9), 
+                                                                                                            width = 0.25, color = "black", linewidth = 0.5)
+
+# Sefi genes just by Cdh1 expression
+VlnPlot(das.dat.epithelial, features = c("Ccn1", "Ccn2", "Axin2")) + stat_summary(fun = median, geom = "crossbar", 
+                                                                                  position = position_dodge(width = 0.9), 
+                                                                                  width = 0.25, color = "black", linewidth = 0.5)
+
+
+### Misc Stuff
+Idents(das.dat.epithelial) <- das.dat.epithelial@meta.data[["type.manual.v1"]]
+# EMT:
+VlnPlot(das.dat.epithelial, features = c("Foxm1", "Cdh1", "Cdh2", "Zeb1", "Zeb2", "Vim"))
+# These are markers of EMT from google: negative (Cdh1 and cytokeratins) and positive (vimentin, N-cadherin (Cdh2), fibronectin), plotted alongside Foxm1 for comparison.
+
+
+
+# Interesting features/cancer stem cell markers/cancer markers but split up a bit so they aren't impossible to read
+VlnPlot(das.dat.epithelial, features = c("Lama3", "Lamb2", "Itga2", "Itga3"), split.by = "treat.ident")
+VlnPlot(das.dat.epithelial, features = c( "Lrig1", "Foxm1", "Sox2", "Clu", "Ptk2"))
+VlnPlot(das.dat.epithelial, features = c( "Prom1", "Icam1", "Epcam", "Aldh1a1", "Aldh1a3", "Klf4"))
+# HDGC genes from https://aacrjournals.org/cancerpreventionresearch/article-abstract/17/8/361/746638/Stool-Protein-Mass-Spectrometry-Identifies (identified because ltf is near the top of the list in our dataset)
+VlnPlot(das.dat.epithelial, features = c("Ltf", "Tpm2", "Dpp4", "Vcp", "Asah2", "Pip"))
+VlnPlot(das.dat.epithelial, features = c("Gli1", "Hsp90ab1", "Lefty1"))
+VlnPlot(das.dat.epithelial, features = c("Ptk2"), split.by = "treat.ident")
+
+# Reset active idents
+Idents(das.dat.epithelial) <- das.dat.epithelial@meta.data[["seurat_clusters"]]
+```
+
+# Create cell type annotations for further analysis
+```{r}
+# Ensure the active idents are correct
+Idents(das.dat.epithelial) <- das.dat.epithelial@meta.data[["seurat_clusters"]]
+
+# Streamlined classifications for presenting
+type.manual.v1 <- c(
+  "Antral Pit Cells",
+  "Chief Cells",
+  "Corpus Pit Cells",
+  "Other Pit Cells",
+  "Mucous Cells",
+  "Cancer Cells",
+  "Parietal Cells",
+  "Progenitor Cells",
+  "Undetermined",
+  "Transitional Cells")
+
+# Table showing the which cluster becomes which annotation clearly
+seurat.cluster <- 0:9
+# Create the data frame
+type.to.cluster <- data.frame(
+  type.manual.v1 = type.manual.v1,
+  seurat.cluster = seurat.cluster
+)
+
+type.to.cluster
+
+names(type.manual.v1) <- levels(das.dat.epithelial)
+das.dat.epithelial <- RenameIdents(das.dat.epithelial, type.manual.v1)
+das.dat.epithelial@meta.data[["type.manual.v1"]] <- das.dat.epithelial@active.ident
+# Compare the labels with the numeric cluster annotations
+grid.arrange(DimPlot(das.dat.epithelial, label = T, group.by = "type.manual.v1"),
+             DimPlot(das.dat.epithelial, label = T, group.by = "seurat_clusters"), ncol = 2)
+
+# Clean up the environment
+rm(list = c("type.manual.v1"))
+```
+
+# Non Pseudo-bulk Data
+### Split up dasatanib data by treatment type for DE analysis
+* There is no psuedo-bulking here. This treats every cell as an individual replicate, which is not accurate as cells are not completely independent of each other
+```{r}
+# Split das dat into two elements of a list
+das.dat.epithelial.list <- SplitObject(das.dat.epithelial, split.by = "treat.ident")
+# Don't re-normalise, or add any additional information, just go from here
+
+# Create a table containing cell types in each dataset and run a chisq test to look for a difference between proportions of cell types in each
+# See if you can also do this while excluding enterocytes
+control.cell.counts <- das.dat.epithelial.list[["Das - control"]]@meta.data[["type.manual.v1"]]
+table(control.cell.counts)
+dasatinib.cell.counts <- das.dat.epithelial.list[["Das - drug"]]@meta.data[["type.manual.v1"]] # %>% .[-5]
+table(dasatinib.cell.counts)
+
+# Run a Chi-squared test on the data and show a proportion table of cell types in each group.
+cbind(table(control.cell.counts), table(dasatinib.cell.counts)) %>% chisq.test()
+cbind(table(control.cell.counts), table(dasatinib.cell.counts)) %>% prop.table(.,2)
+
+# Make objects of log normalised RNA expression
+das.epi.control.dat <- das.dat.epithelial.list[["Das - control"]]@assays[["RNA"]]@data
+das.epi.dasatinib.dat <- das.dat.epithelial.list[["Das - drug"]]@assays[["RNA"]]@data
+
+# Check number of genes and cells in each dataset
+das.dat.epithelial.list[["Das - control"]]@assays[["RNA"]]@data %>% dim()
+# 551 control cells
+das.dat.epithelial.list[["Das - drug"]]@assays[["RNA"]]@data %>% dim()
+# 450 drugged cells
+
+# Make objects of treatments per cell
+# IS THIS TREATMENT PER CELL? looks like it's just the ID for the treatment type repeated, without any actual info on which cell is which
+das.epi.control.treat <- das.dat.epithelial.list[["Das - control"]]@meta.data[["treat.ident"]]
+das.epi.dasatinib.treat <- das.dat.epithelial.list[["Das - drug"]]@meta.data[["treat.ident"]]
+
+# Make objects of annotated cluster ids (type.manual.v1) per cell 
+das.epi.control.clusters <- das.dat.epithelial.list[["Das - control"]]@meta.data[["type.manual.v1"]]
+das.epi.dasatinib.clusters <- das.dat.epithelial.list[["Das - drug"]]@meta.data[["type.manual.v1"]]
+
+# Genes with positive logFC mean they're more highly expressed in the dasatinib group (limma uses alphabetical order of control vs dasatinib)
+
+# Clean up the environment
+rm(list = c("control.cell.counts", "dasatinib.cell.counts", "das.dat.epithelial.list"))
+```
+
+### Limma DE and GSEA
+```{r, warning = FALSE}
+# Create list objects to save data into
+tt.epithelial.limma <- list()
+DE.epithelial.limma <- list()
+gsea.epithelial.limma <- list()
+gsea.epithelial.limma.collapsed <- list()
+
+# Run through a loop that does limma DE, fgsea GSEA, and fixes the names of genes in GSEA results to something more readable
+for(x in levels(das.dat.epithelial@meta.data[["type.manual.v1"]])){
+  # Subset data and run differential expression analysis on Cluster x
+  das.epi.control.x <- das.epi.control.dat[, das.epi.control.clusters == x]
+  das.epi.dasatinib.x <- das.epi.dasatinib.dat[, das.epi.dasatinib.clusters == x]
+  das.epi.combined.x <- cbind(das.epi.control.x, das.epi.dasatinib.x)
+  das.epi.groups.x <- c(das.epi.control.treat[das.epi.control.clusters == x], das.epi.dasatinib.treat[das.epi.dasatinib.clusters == x])
+  
+  # Define grouping variable more clearly for limma
+  group.x <- ifelse(das.epi.groups.x == "Das - control", "control", "dasatinib")
+  # Create design matrix: looks good
+  design.x <- model.matrix(~group.x)
+  colnames(design.x) <- c("Mean", "ControlVsDasatinib")
+  design.x %>% head()
+  design.x %>% tail()
+  # Fit linear model
+  # voom plot to see what it looks like - pretty weird, but you don't actually use the voom output here since allegedly it's already normalised
+  print(voom(das.epi.combined.x, plot = TRUE))
+  fit.x <- lmFit(as.matrix(das.epi.combined.x), design.x)
+  fit.x <- eBayes(fit.x)
+  tt.x <- topTable(fit.x, coef = "ControlVsDasatinib", adjust = "BH", n = nrow(das.epi.combined.x))
+  # Sum number of significantly DE genes in tt
+  sum(tt.x$adj.P.Val<0.05)
+  # Report names of significantly DE genes
+  rownames(tt.x[tt.x$adj.P.Val < 0.05,])
+  DE.x <- rownames(tt.x[tt.x$adj.P.Val < 0.05,])
+  
+  # Add the top table to the list of top tables
+  tt.epithelial.limma[[x]] <- tt.x
+  # Add the significantly DE genes to the list of significantly DE genes
+  DE.epithelial.limma[[x]] <- DE.x
+}
+
+for(x in levels(das.dat.epithelial@meta.data[["type.manual.v1"]])){
+  # GSEA
+  # Create list of genes ranked by t statistic for gsea
+  tt.x <- data.table(tt.epithelial.limma[[x]], keep.rownames = T)
+  ranks.x <- tt.x[order(t), list(rn, t)]
+  
+  # Convert gene names to EntrezIDs
+  ranks.x$rn <- AnnotationDbi::select(mm,
+                                      keys = ranks.x$rn,
+                                      columns = "ENTREZID",
+                                      keytype = "SYMBOL") %>% .[,"ENTREZID"]
+  # Remove NA's where symbols haven't mapped to entrez IDs
+  ranks.x <- na.omit(ranks.x)
+  # Find reactome pathways
+  gsea.reactome.x <- reactomePathways(ranks.x$rn)
+  # Convert ranks.x to the right format (named t stats) for analysis
+  ranks.x.v2 <- ranks.x$t
+  names(ranks.x.v2) <- ranks.x$rn
+  # Remove duplicates
+  # ranks.x.v2 <- ranks.x.v2[!duplicated(names(ranks.x.v2))]
+  # Test for significant pathway over-representation
+  # Save into the gsea.epithelial.limma object
+  gsea.epithelial.limma[[x]] <- fgsea(gsea.reactome.x, ranks.x.v2, maxSize = 500, minSize = 20) %>% .[order(padj),] %>% .[.$padj < 0.05,]
+  # names(gsea.epithelial.limma)[x] <- names(tt.epithelial.limma)[x]
+  # To make a version without filtering on gene set maximum and minimum sizes
+  # gsea.epithelial.limma[[x]] <- fgsea(gsea.reactome.x, ranks.x.v2) %>% .[order(padj),] %>% .[.$padj < 0.05,]
+  
+  # Create a list of pathways with children collapsed
+  gsea.epithelial.limma.collapsed[[x]] <- collapsePathways(gsea.epithelial.limma[[x]], gsea.reactome.x, stats = ranks.x.v2)
+  # names(gsea.epithelial.limma.collapsed)[x] <- names(tt.epithelial.limma)[x]
+}
+
+for(x in levels(das.dat.epithelial@meta.data[["type.manual.v1"]])){
+  # Replace leading edge entrez ID's with symbols.
+  entrez.xx <- gsea.epithelial.limma[[x]][["leadingEdge"]]
+  symbol.xx <- list()
+  if(length(entrez.xx) != 0){
+    for(xx in 1:length(entrez.xx)){
+      symbol.xx[[xx]] <- AnnotationDbi::select(mm,
+                                               keys = unlist(entrez.xx[xx]),
+                                               columns = "SYMBOL",
+                                               keytype = "ENTREZID") %>% .[,"SYMBOL"]
+    }
+    # Add to gsea table
+    gsea.epithelial.limma[[x]][["leadingEdge"]] <- symbol.xx
+    # Sort leadingEdge alphabetically
+    gsea.epithelial.limma[[x]][["leadingEdge"]] <- gsea.epithelial.limma[[x]][["leadingEdge"]] %>% lapply(., sort)
+    # Collapse leadingEdge from a list into a vector
+    gsea.epithelial.limma[[x]][["leadingEdge"]] <- gsea.epithelial.limma[[x]][["leadingEdge"]] %>%  sapply(., function(x) paste(x, collapse = ", "))
+    # Convert to character
+    gsea.epithelial.limma[[x]][["leadingEdge"]] <- gsea.epithelial.limma[[x]][["leadingEdge"]] %>% as.character(.)
+  }
+} 
+
+# Order the two objects alphabetically by list elements
+gsea.epithelial.limma <- gsea.epithelial.limma[order(names(gsea.epithelial.limma))]
+gsea.epithelial.limma.collapsed <- gsea.epithelial.limma.collapsed[order(names(gsea.epithelial.limma.collapsed))]
+
+# Clean up the environment
+rm(list = c("das.epi.control.dat", "das.epi.dasatinib.dat", "das.epi.control.treat", "das.epi.dasatinib.treat", "das.epi.control.clusters", "das.epi.dasatinib.clusters", # objects from the previous chunk
+            "x", "das.epi.control.x", "das.epi.dasatinib.x", "das.epi.combined.x", "das.epi.groups.x", # temp organisational objects
+            "group.x", "design.x", "fit.x", "tt.x", "DE.x", # temp objects from limma DE
+            "tt.x", "ranks.x","gsea.reactome.x", "ranks.x.v2",  # temp objects from GSEA
+            "xx", "entrez.xx", "symbol.xx" # temp objects from entrez ID matching
+))
+```
+
+### Save these all as excel files
+```{r}
+# Format GSEA results here
+# Top tables and GSEA
+for(x in names(tt.epithelial.limma)){
+  cluster.name <- gsub(" ", "_", x)
+  gsea.table.x <- gsea.epithelial.limma[[x]]
+  # collapse leading edge for gsea table
+  if(nrow(gsea.epithelial.limma[[x]]) != 0){
+    for(xx in 1:length(gsea.epithelial.limma[[x]][["leadingEdge"]])){
+      gsea.table.x$leadingEdge[xx] <- paste(gsea.epithelial.limma[[x]][["leadingEdge"]][[xx]], collapse="::")
+      gsea.table.x$leadingEdge <- as.character(gsea.table.x$leadingEdge)
+    }
+  }
+  write.csv(as.data.frame(gsea.table.x), file = paste0("3_output/gsea_limmavoom/", cluster.name, ".csv"))
+  # To save a version without filtering on gene set maximum and minimum sizes
+}
+
+# Tidy up the environment
+rm(list = c("cluster.name", "gsea.table.x", "x", "xx"))
+```
+
+# Psuedo-bulk Data
+### Aggregate and reformat counts matrix
+Note that this currently works with raw counts (i.e. the counts slot from das.dat.epithelial2), which means they need to be normalised at some point - once aggregated, during the limma and DEseq workflows
+```{r}
+# Aggregate counts by cell type, and then sample + treatment
+das.dat.epithelial2 <- das.dat.epithelial
+das.dat.epithelial2$samp.treat.ident <- paste0(das.dat.epithelial2$samp.ident, "_", das.dat.epithelial2$treat.ident)
+# Aggregate counts across cells
+# This group cells by cell type, and then by sample/treatment combined
+# Saves as a new object, cts (counts). Let's do this with counts, and make use of Limma's voom, which we haven't previously
+# (Counts is raw, data should have been normalised earlier on)
+cts <- AggregateExpression(das.dat.epithelial2,
+                           group.by = c("type.manual.v1", "samp.treat.ident"),
+                           slot = "counts")
+# Transpose and then split rows by cell type, to get a list with elements that are matrices associated with a cell type
+# Isolate counts and transpose
+cts.t <- t(cts$RNA)
+# Data frame
+cts.t <- as.data.frame(cts.t)
+# Split by cell type - obtaining just the cell type info
+splitRows <- gsub("_.*", "", rownames(cts.t))
+# Use this to split the data frame
+cts.split <- split.data.frame(cts.t,
+                              f = factor(splitRows))
+# Fix column names (remove cell type) and re-transpose
+cts.final <- lapply(cts.split, function(x){
+  rownames(x) <- gsub("^[^_]*_(.*)", "\\1", rownames(x))
+  t(x)
+})
+
+# Generate sample level metadata
+colData <- list()
+for(i in 1:length(cts.final)){
+  colData[[i]] <- data.frame(samples = colnames(cts.final[[i]])) %>%
+    mutate(condition = ifelse(grepl("Das - drug", samples), "Dasatinib", "Control")) %>%
+    column_to_rownames(var = "samples")
+  names(colData)[i] <- names(cts.final)[i]
+}
+
+# Tidy up the environment
+rm(list = c("cts", "cts.t", "splitRows", "cts.split", "i"))
+```
+
+### Limma Pseudo-bulking DE and GSEA
+* Filters out genes with no reads at all
+* Note that this is now done on raw counts (not counts per million) so it's in line with DESeq2, this is slightly less strict
+* Otherwise follows https://github.com/csoneson/conquer_comparison/blob/master/scripts/apply_voomlimma.R
+```{r, warning = F, message = F}
+# Create list objects to save data into
+tt.epithelial.limma.pseudo <- list()
+gsea.epithelial.limma.pseudo <- list()
+gsea.epithelial.limma.pseudo.collapsed <- list()
+
+# Identify differentially expressed genes and run GSEA
+for(y in names(cts.final)){
+  # # Filter out genes that fail to show at least 1 read per million
+  # keep.y <- rowSums(edgeR::cpm(cts.final[[y]])>1) >= 1
+  # Filter out genes that fail to show at least 1 read
+  keep.y <- rowSums(cts.final[[y]]>1) >= 1
+  print(table(keep.y))
+  cts.final.y <- cts.final[[y]][keep.y,]
+  # Create design matrix: looks good
+  design.y <- model.matrix(~as.matrix(colData[[y]]))
+  # Rename 
+  colnames(design.y) <- c("Mean", "ControlVsDasatinib")
+  # Convert the data into a DGE object
+  dge.y <- DGEList(counts = cts.final.y, group = colData[[y]]$condition) %>%
+    calcNormFactors() # and calculates scaling factors
+  # Voom for limma normalisation
+  dge.voom.y <- voom(dge.y, design.y, plot = F)
+  # Saves normalised data as a new object
+  cts.voom.y <- dge.voom.y$E
+  # Fit linear model
+  fit.y <- lmFit(as.matrix(cts.voom.y), design.y) %>%
+    eBayes() # and Bayesian
+  tt.epithelial.limma.pseudo[[y]] <- topTable(fit.y, coef = "ControlVsDasatinib", adjust = "BH", n = nrow(cts.voom.y)) %>% .[order(.$adj.P.Val),]
+}
+
+for(y in names(tt.epithelial.limma.pseudo)){
+  # Run GSEA
+  # Create list of genes ranked by t statistic for gsea
+  ranks.y <- data.frame(matrix(NA, nrow = nrow(tt.epithelial.limma.pseudo[[y]]), ncol = 2))
+  colnames(ranks.y) <-  c("rn", "t")
+  ranks.y$rn <- rownames(tt.epithelial.limma.pseudo[[y]])
+  ranks.y$t <- tt.epithelial.limma.pseudo[[y]]$t
+  # Make sure it's definitely ordered
+  ranks.y <- ranks.y[order(ranks.y$t), ]
+  
+  # Convert gene names to EntrezIDs
+  ranks.y$rn <- AnnotationDbi::select(mm,
+                                      keys = ranks.y$rn,
+                                      columns = "ENTREZID",
+                                      keytype = "SYMBOL") %>% .[,"ENTREZID"]
+  # Remove NA's where symbols haven't mapped to entrez IDs
+  ranks.y <- na.omit(ranks.y)
+  # Find reactome pathways that map to these genes (not enriched)
+  gsea.reactome.y <- reactomePathways(ranks.y$rn)
+  # Convert ranks.y to the right format (named t stats) for analysis
+  ranks.y.v2 <- ranks.y$t
+  names(ranks.y.v2) <- ranks.y$rn
+  # Remove duplicates
+  # ranks.y.v2 <- ranks.y.v2[!duplicated(names(ranks.y.v2))]
+  
+  # Test for significant pathway over-representation
+  gsea.epithelial.limma.pseudo[[y]] <- fgsea(gsea.reactome.y, ranks.y.v2, maxSize = 500, minSize = 20) %>% .[order(padj),] %>% .[.$padj < 0.05,]
+  # To make a version without filtering on gene set maximum and minimum sizes
+  # gsea.epithelial.limma.pseudo[[y]] <- fgsea(gsea.reactome.y, ranks.y.v2) %>% .[order(padj),] %>% .[.$padj < 0.05,]
+  
+  # Create a list of pathways with children collapsed
+  gsea.epithelial.limma.pseudo.collapsed[[y]] <- collapsePathways(gsea.epithelial.limma.pseudo[[y]], gsea.reactome.y, stats = ranks.y.v2)
+}
+
+for(y in names(gsea.epithelial.limma.pseudo)){
+  # Convert names of genes in paths back to symbols for readability
+  entrez.y <- gsea.epithelial.limma.pseudo[[y]][["leadingEdge"]]
+  symbol.y <- list()
+  if(length(entrez.y) != 0){
+    for(yy in 1:length(entrez.y)){
+      symbol.y[[yy]] <- AnnotationDbi::select(mm,
+                                              keys = unlist(entrez.y[yy]),
+                                              columns = "SYMBOL",
+                                              keytype = "ENTREZID") %>% .[,"SYMBOL"]
+    }
+    # Add symbols to gsea table
+    gsea.epithelial.limma.pseudo[[y]][["leadingEdge"]] <- symbol.y
+    # Sort alphabetically in the list
+    gsea.epithelial.limma.pseudo[[y]][["leadingEdge"]] <- gsea.epithelial.limma.pseudo[[y]][["leadingEdge"]] %>%  lapply(., sort)
+    # Collapse to a string
+    gsea.epithelial.limma.pseudo[[y]][["leadingEdge"]] <- gsea.epithelial.limma.pseudo[[y]][["leadingEdge"]] %>% sapply(., function(x) paste(x, collapse = ", "))
+    # Convert to character
+    gsea.epithelial.limma.pseudo[[y]][["leadingEdge"]] <- gsea.epithelial.limma.pseudo[[y]][["leadingEdge"]] %>% as.character(.)
+  }
+}
+
+
+# Tidy up the environment
+rm(list = c("keep.y", "cts.final.y", "design.y", "dge.y", "dge.voom.y", "cts.voom.y", "fit.y", # Temp objects from limma DE
+            "ranks.y", "gsea.reactome.y", "ranks.y.v2", # Temp objects from fgsea GSEA
+            "entrez.y", "symbol.y", # Temp objects from gene naming
+            "y", "yy")) # objects from loops
+```
+
+### DESeq2 DE and GSEA
+Filters out any genes with no reads at all (as per https://www.youtube.com/watch?v=04gB2owLKus)
+Otherwise follows https://github.com/csoneson/conquer_comparison/blob/master/scripts/apply_DESeq2.R from https://www.nature.com/articles/nmeth.4612
+```{r, message=F, warning=F}
+# Create list objects to save data into
+tt.epithelial.DESeq2.pseudo <- list()
+gsea.epithelial.DESeq2.pseudo <- list()
+gsea.epithelial.DESeq2.pseudo.collapsed <- list()
+# Identify differentially expressed genes and run GSEA 
+for(z in names(cts.final)){
+  # Extract the metadata for element z
+  colData.z <- as.data.frame(colData[[z]])
+  # Rename to help create the design matrix (created properly in the DESeqDataSetFromMatrix command)
+  colnames(colData.z) <- "condition"
+  # Create the DESeq2 object
+  dds.z <- DESeqDataSetFromMatrix(countData = cts.final[[z]],
+                                  colData = colData.z,
+                                  design = ~condition)
+  # Filter out genes without any reads
+  keep.z <- rowSums(counts(dds.z)) >= 1
+  dds.z <- dds.z[keep.z, ]
+  # Find DE genes
+  dds.z <- DESeq(dds.z)
+  # Extract results in a readable format, ordered by adjusted p value
+  tt.epithelial.DESeq2.pseudo[[z]] <- results(dds.z) %>% as.data.frame() %>% .[order(.$padj), ]
+}
+
+for(z in names(tt.epithelial.DESeq2.pseudo)){
+  # Create the list of genes ranked by t statistic for GSEA
+  ranks.z <- data.frame(matrix(NA, nrow = nrow(tt.epithelial.DESeq2.pseudo[[z]]), ncol = 2))
+  colnames(ranks.z) <- c("rn", "t")
+  ranks.z$rn <- rownames(tt.epithelial.DESeq2.pseudo[[z]])
+  ranks.z$t <- tt.epithelial.DESeq2.pseudo[[z]]$stat
+  # Confirm that the list is ordered by t statistic
+  ranks.z <- ranks.z[order(ranks.z$t), ]
+  # Convert gene names to EntrezIDs
+  ranks.z$rn <- AnnotationDbi::select(mm,
+                                      keys = ranks.z$rn,
+                                      columns = "ENTREZID",
+                                      keytype = "SYMBOL") %>% .[,"ENTREZID"]
+  # Remove NA's where symbols haven't mapped to entrez IDs
+  ranks.z <- na.omit(ranks.z)
+  # Find reactome pathways
+  gsea.reactome.z <- reactomePathways(ranks.z$rn)
+  # Convert ranks.z to the right format (named t stats) for analysis
+  ranks.z.v2 <- ranks.z$t
+  names(ranks.z.v2) <- ranks.z$rn
+  # Remove duplicates
+  # ranks.z.v2 <- ranks.z.v2[!duplicated(names(ranks.z.v2))]
+  # Test for significant pathway over-representation
+  gsea.epithelial.DESeq2.pseudo[[z]] <- fgsea(gsea.reactome.z, ranks.z.v2, maxSize = 500, minSize = 20) %>% .[order(padj),] %>% .[.$padj < 0.05,]
+  # To make a version without filtering on gene set maximum and minimum sizes
+  # gsea.epithelial.DESeq2.pseudo <- fgsea(gsea.reactome.z, ranks.z.v2) %>% .[order(padj),] %>% .[.$padj < 0.05,]
+  # Create a list of pathways with children collapsed
+  gsea.epithelial.DESeq2.pseudo.collapsed[[z]] <- collapsePathways(gsea.epithelial.DESeq2.pseudo[[z]], gsea.reactome.z, stats = ranks.z.v2)
+}
+
+for(z in names(gsea.epithelial.DESeq2.pseudo)){
+  # Convert names of genes in paths back to symbols for readability
+  entrez.z <- gsea.epithelial.DESeq2.pseudo[[z]][["leadingEdge"]]
+  symbol.z <- list()
+  if(length(entrez.z) != 0){
+    for(zz in 1:length(entrez.z)){
+      symbol.z[[zz]] <- AnnotationDbi::select(mm,
+                                              keys = unlist(entrez.z[zz]),
+                                              columns = "SYMBOL",
+                                              keytype = "ENTREZID") %>% .[,"SYMBOL"]
+    }
+    # Add symbols to gsea table
+    gsea.epithelial.DESeq2.pseudo[[z]][["leadingEdge"]] <- symbol.z
+    # Sort alphabetically in the list
+    gsea.epithelial.DESeq2.pseudo[[z]][["leadingEdge"]] <- gsea.epithelial.DESeq2.pseudo[[z]][["leadingEdge"]] %>%  lapply(., sort)
+    # Collapse to a string
+    gsea.epithelial.DESeq2.pseudo[[z]][["leadingEdge"]] <- gsea.epithelial.DESeq2.pseudo[[z]][["leadingEdge"]] %>% sapply(., function(x) paste(x, collapse = ", "))
+    # Convert to character
+    gsea.epithelial.DESeq2.pseudo[[z]][["leadingEdge"]] <- gsea.epithelial.DESeq2.pseudo[[z]][["leadingEdge"]] %>% as.character(.)
+  }
+}
+
+# Tidy up the environment
+rm(list = c("colData.z", "dds.z", "keep.z", # Temp objects from DESeq2 DE
+            "ranks.z", "gsea.reactome.z", "ranks.z.v2", # Temp objects from fgsea GSEA
+            "entrez.z", "symbol.z", # Temp objects from gene naming
+            "z", "zz")) # Objects from loops
+```
+
+# Compare the outputs of different DE GSEA analyses
+# Currently doesn't make the other pit cells plot properly because there's a vector of 0 in it
+```{r}
+gsea.parent.overlap <- list()
+# Loop through each cell type and compare the overlap in parent enriched pathway terms
+for(a in names(gsea.epithelial.DESeq2.pseudo.collapsed)){
+  # Define the character vectors for each list of parent pathways
+  a.1 <- gsea.epithelial.DESeq2.pseudo.collapsed[[a]]$mainPathways
+  a.2 <- gsea.epithelial.limma.collapsed[[a]]$mainPathways
+  a.3 <- gsea.epithelial.limma.pseudo.collapsed[[a]]$mainPathways
+  
+  # Find out which pathways are present in 
+  # intersect.a <- Reduce(intersect, list(a.1, a.2, a.3))
+  # # Print the intersection out
+  # cat(paste0(a, " Common Parent Pathways:"), paste(intersect.a, collapse = ", "), "\n")
+  
+  # Create a named list of the sets
+  venn.list.a <- list(
+    "DESeq2 Pseudo-bulked" = a.1,
+    "Limma" = a.2,
+    "Limma Pseudo-bulked" = a.3
+  )
+  
+  # Generate the Venn diagram
+  venn.plot.a <- venn.diagram(
+    venn.list.a,
+    filename = NULL, # Set to NULL to display in RStudio viewer
+    fill = c("red", "blue", "green"),
+    alpha = 0.5,
+    cex = 1.5,
+    cat.cex = 1.2,
+    cat.col = c("red", "blue", "green"),
+    main = "Overlap in Parent Reactome Terms"
+  )
+  
+  # Save each diagram to a file
+  png(paste0("3_output/gsea_parent_overlap/", a, ".png"))    # File name based on loop index
+  grid::grid.draw(venn.plot.a)                     # Draw the Venn diagram
+  dev.off()   
+  
+  # Print intersections for only the pseudo-bulked methods if there are any and no vectors are empty
+  if (length(a.1) == 0 || length(a.3) == 0) {
+    cat(a, "skipped due to empty vector.\n")
+    next
+  }
+  # Define the intersect for the two vectors
+  intersect.a <- Reduce(intersect, list(a.1, a.3))
+  # Print the intersection for this iteration
+  if (length(intersect.a) > 0) {
+    # Print
+    cat(paste0(a, " common parent pathways (limma psuedo and DESeq2 pseudo): "), paste(intersect.a, collapse = ", "), "\n")
+    # Assign to list element
+    gsea.parent.overlap[[a]][["Common parent pathways (limma psuedo and DESeq2 pseudo)"]] <- intersect.a
+  } else {
+    # Print
+    cat(a, ": no common parent pathways (limma psuedo and DESeq2 pseudo) \n", sep = "")
+    # Assign blank to list element
+    gsea.parent.overlap[[a]][["Common parent pathways (limma psuedo and DESeq2 pseudo)"]] <- NA
+  }
+  
+  
+  # Re-define the intersect for all three vectors
+  intersect.a <- Reduce(intersect, list(a.1, a.2, a.3))
+  # Print intersections for all three methods if there are any and no vectors are empty
+  if (length(a.1) == 0 || length(a.2) == 0 || length(a.3) == 0) {
+    cat(a, "skipped due to empty vector.\n")
+    next
+  }
+  
+  if (length(intersect.a) > 0) {
+    # Print
+    cat(paste0(a, " common parent pathways (limma raw and limma psuedo and DESeq2 pseudo): "), paste(intersect.a, collapse = ", "), "\n")
+    # Assign to list element
+    gsea.parent.overlap[[a]][["Common parent pathways (limma raw and limma psuedo and DESeq2 pseudo)"]] <- intersect.a
+  } else {
+    # Print
+    cat(a, ": no common parent pathways (limma raw and limma psuedo and DESeq2 pseudo) \n", sep = "")
+    # Assign blank to list element
+    gsea.parent.overlap[[a]][["Common parent pathways (limma raw and limma psuedo and DESeq2 pseudo)"]] <- NA
+  }
+  
+  
+  # # Find the intersection of the three vectors
+  # intersect.a <- Reduce(intersect, list(a.1, a.2, a.3))
+  # # Print the intersection for this iteration
+  # if (length(intersect.a) > 0) {
+  #   cat(paste0(a, " Common Parent Pathways (3):"), paste(intersect.a, collapse = ", "), "\n")
+  # } else {
+  #   cat("Iteration", a, "no common elements.\n")
+  # }  
+}
+
+# Tidy up the environment
+rm(list = c("a.1", "a.2", "a.3", # Vectors
+            "intersect.a", "venn.list.a", "venn.plot.a", "a")) # Other objects
+```
+
+### Output parent pathway overlap tables
+```{r}
+gsea.parent.overlap.output <- list()
+
+for(b in names(gsea.epithelial.limma.pseudo)){
+  
+  # Extract the table from limma pseudo
+  gsea.parent.overlap.b <- gsea.epithelial.limma.pseudo[[b]]
+  # Filter the table by parent overlap
+  keep.b <- gsea.parent.overlap[[b]][["Common parent pathways (limma psuedo and DESeq2 pseudo)"]]
+  gsea.parent.overlap.b <- gsea.parent.overlap.b[which(gsea.parent.overlap.b$pathway %in% keep.b), ]
+  # Remove unwanted columns
+  gsea.parent.overlap.b <- gsea.parent.overlap.b[, -c("pval", "log2err", "ES", "NES")]
+  # Extract and add desired columns from DESeq2
+  gsea.parent.overlap.bb <- gsea.epithelial.DESeq2.pseudo[[b]]
+  gsea.parent.overlap.bb <- gsea.parent.overlap.bb[which(gsea.parent.overlap.bb$pathway %in% keep.b), ]
+  gsea.parent.overlap.bb <- gsea.parent.overlap.bb[, -c("pval", "log2err", "ES", "NES")]
+  # Merge and rename remaining columns
+  # Merge by 'pathway', keeping only rows from df1
+  gsea.parent.overlap.bbb <- merge(gsea.parent.overlap.b, gsea.parent.overlap.bb, by = "pathway", all.x = TRUE)
+  
+  # Rename overlapping columns (excluding 'pathway')
+  gsea.parent.overlap.bbb <- dplyr::rename(gsea.parent.overlap.bbb,
+                                           "Adjusted P-Value (limma)" = padj.x,
+                                           "Adjusted P-Value (DESeq2)" = padj.y,
+                                           "Size (limma)" = size.x,
+                                           "Size (DESeq2)" = size.y,
+                                           "Leading Edge (limma)" = leadingEdge.x,
+                                           "Leading Edge (DESeq2)" = leadingEdge.y,
+                                           "Parent Reactome Pathway Term" = pathway)
+  # Reorder columns
+  gsea.parent.overlap.bbb <- gsea.parent.overlap.bbb %>% dplyr::select("Parent Reactome Pathway Term", "Adjusted P-Value (limma)", "Size (limma)", "Leading Edge (limma)", "Adjusted P-Value (DESeq2)", "Size (DESeq2)", "Leading Edge (DESeq2)")
+  # Collapse columns that are lists into vectors
+  gsea.parent.overlap.bbb$`Leading Edge (limma)` <- sapply(gsea.parent.overlap.bbb$`Leading Edge (limma)` , function(x) paste(x, collapse = ", "))
+  gsea.parent.overlap.bbb$`Leading Edge (DESeq2)` <- sapply(gsea.parent.overlap.bbb$`Leading Edge (DESeq2)` , function(x) paste(x, collapse = ", "))
+  # Compute average rank of the two adjusted P-values and sort
+  gsea.parent.overlap.bbb <- gsea.parent.overlap.bbb %>%
+    mutate(avg_rank = (rank(`Adjusted P-Value (limma)`) + rank(`Adjusted P-Value (DESeq2)`)) / 2) %>%
+    dplyr::arrange(avg_rank) %>%
+    dplyr::select(-avg_rank)  # Remove temporary rank column after sorting
+  # Round adjusted P-values to 3 d.p
+  gsea.parent.overlap.bbb[] <- lapply(gsea.parent.overlap.bbb, function(column) {
+    if (is.numeric(column)) {
+      as.character(pref.round(column)) # Convert to character to preserve formatting
+    } else {
+      column # Leave non-numeric columns unchanged
+    }
+  })
+  
+  # Assign to list element
+  gsea.parent.overlap.output[[b]] <- gsea.parent.overlap.bbb
+  # Write output
+  write.csv(gsea.parent.overlap.output[[b]], file = paste0("3_output/gsea_parent_overlap/", gsub(" ", "_", b), ".csv"), row.names = F)
+}
+
+# Tidy up the environment
+rm(list = c("gsea.parent.overlap.b", "gsea.parent.overlap.bb", "gsea.parent.overlap.bbb",
+            "keep.b", "b"))
+```
+
+# Output all pathway overlap tables
+```{r}
+gsea.overlap.output <- list()
+
+for(b in names(gsea.epithelial.limma.pseudo)){
+  
+  # Extract the table from limma pseudo
+  gsea.overlap.b <- gsea.epithelial.limma.pseudo[[b]]
+  # Filter the table by parent overlap
+  keep.b <- intersect(
+    names(gsea.epithelial.limma.pseudo.collapsed[[b]][["parentPathways"]]),
+    names(gsea.epithelial.DESeq2.pseudo.collapsed[[b]][["parentPathways"]])
+  )
+  
+  
+  gsea.overlap.b <- gsea.overlap.b[which(gsea.overlap.b$pathway %in% keep.b), ]
+  # Remove unwanted columns
+  gsea.overlap.b <- gsea.overlap.b[, -c("pval", "log2err", "ES", "NES")]
+  # Extract and add desired columns from DESeq2
+  gsea.overlap.bb <- gsea.epithelial.DESeq2.pseudo[[b]]
+  gsea.overlap.bb <- gsea.overlap.bb[which(gsea.overlap.bb$pathway %in% keep.b), ]
+  gsea.overlap.bb <- gsea.overlap.bb[, -c("pval", "log2err", "ES", "NES")]
+  # Merge and rename remaining columns
+  # Merge by 'pathway', keeping only rows from df1
+  gsea.overlap.bbb <- merge(gsea.overlap.b, gsea.overlap.bb, by = "pathway", all.x = TRUE)
+  
+  # Rename overlapping columns (excluding 'pathway')
+  gsea.overlap.bbb <- dplyr::rename(gsea.overlap.bbb,
+                                    "Adjusted P-Value (limma)" = padj.x,
+                                    "Adjusted P-Value (DESeq2)" = padj.y,
+                                    "Size (limma)" = size.x,
+                                    "Size (DESeq2)" = size.y,
+                                    "Leading Edge (limma)" = leadingEdge.x,
+                                    "Leading Edge (DESeq2)" = leadingEdge.y,
+                                    "Reactome Pathway Term" = pathway)
+  # Reorder columns
+  gsea.overlap.bbb <- gsea.overlap.bbb %>% dplyr::select("Reactome Pathway Term", "Adjusted P-Value (limma)", "Size (limma)", "Leading Edge (limma)", "Adjusted P-Value (DESeq2)", "Size (DESeq2)", "Leading Edge (DESeq2)")
+  # Collapse columns that are lists into vectors
+  gsea.overlap.bbb$`Leading Edge (limma)` <- sapply(gsea.overlap.bbb$`Leading Edge (limma)` , function(x) paste(x, collapse = ", "))
+  gsea.overlap.bbb$`Leading Edge (DESeq2)` <- sapply(gsea.overlap.bbb$`Leading Edge (DESeq2)` , function(x) paste(x, collapse = ", "))
+  # Compute average rank of the two adjusted P-values and sort
+  gsea.overlap.bbb <- gsea.overlap.bbb %>%
+    mutate(avg_rank = (rank(`Adjusted P-Value (limma)`) + rank(`Adjusted P-Value (DESeq2)`)) / 2) %>%
+    dplyr::arrange(avg_rank) %>%
+    dplyr::select(-avg_rank)  # Remove temporary rank column after sorting
+  # Round adjusted P-values to 4 s.f
+  # gsea.overlap.bbb <- gsea.overlap.bbb %>% dplyr::mutate(across(where(is.numeric), ~ round(.x, 4)))
+  gsea.overlap.bbb[] <- lapply(gsea.overlap.bbb, function(column) {
+    if (is.numeric(column)) {
+      as.character(pref.round(column)) # Convert to character to preserve formatting
+    } else {
+      column # Leave non-numeric columns unchanged
+    }
+  })
+  # Assign to list element
+  gsea.overlap.output[[b]] <- gsea.overlap.bbb
+  # Write output
+  write.csv(gsea.overlap.output[[b]], file = paste0("3_output/gsea_overlap/", gsub(" ", "_", b), ".csv"), row.names = F)
+}
+
+# Tidy up the environment
+rm(list = c("gsea.overlap.b", "gsea.overlap.bb", "gsea.overlap.bbb",
+            "keep.b", "b"))
+```
+
+# Tidy and output GSEA results and toptables
+
+### Top tables
+* For limma not pseudo-bulked
+```{r}
+tt.epithelial.limma.table <- list()
+for(x in names(tt.epithelial.limma)){
+  cluster.name <- gsub(" ", "_", x)
+  # Add a column of gene names
+  tt.epithelial.limma.table[[x]] <- rownames_to_column(tt.epithelial.limma[[x]], "Gene Symbol")
+  # Name the new list element
+  names(tt.epithelial.limma.table[x]) <- x
+  # Remove unnecessary columns
+  tt.epithelial.limma.table[[x]] <- tt.epithelial.limma.table[[x]] %>% dplyr::select(-c("P.Value", "B"))
+  # Remove rows where symbol = NA
+  tt.epithelial.limma.table[[x]] <- tt.epithelial.limma.table[[x]] %>% dplyr::filter(!is.na(`Gene Symbol`))
+  # Rename columns
+  tt.epithelial.limma.table[[x]] <- dplyr::rename(tt.epithelial.limma.table[[x]],
+                                                  "Adjusted P-Value" = adj.P.Val,
+                                                  "Average Expression" = AveExpr,
+                                                  "log2 Fold Change" = logFC,
+                                                  "t Statistic" = t)
+  # Reorder columns
+  tt.epithelial.limma.table[[x]] <- tt.epithelial.limma.table[[x]] %>% dplyr::select("Gene Symbol", "Adjusted P-Value", "t Statistic", "Average Expression", "log2 Fold Change")
+  # Round numeric columns
+  tt.epithelial.limma.table[[x]][] <- lapply(tt.epithelial.limma.table[[x]], function(column) {
+    if (is.numeric(column)) {
+      as.character(pref.round(column)) # Convert to character to preserve formatting
+    } else {
+      column # Leave non-numeric columns unchanged
+    }
+  })
+  # Save as a table
+  write.csv(tt.epithelial.limma.table[[x]], file = paste0("3_output/tt_limmavoom/", cluster.name, ".csv"), row.names = F)
+}
+
+# Tidy up the environment
+rm(list = c("x", "cluster.name", "tt.epithelial.limma.table"))
+```
+
+* For limma pseudo-bulked
+```{r}
+tt.epithelial.limma.pseudo.table <- list()
+for(x in names(tt.epithelial.limma.pseudo)){
+  cluster.name <- gsub(" ", "_", x)
+  # Add a column of gene names
+  tt.epithelial.limma.pseudo.table[[x]] <- rownames_to_column(tt.epithelial.limma.pseudo[[x]], "Gene Symbol")
+  # Name the new list element
+  names(tt.epithelial.limma.pseudo.table[x]) <- x
+  # Remove unnecessary columns
+  tt.epithelial.limma.pseudo.table[[x]] <- tt.epithelial.limma.pseudo.table[[x]] %>% dplyr::select(-c("P.Value", "B"))
+  # Remove rows where symbol = NA
+  tt.epithelial.limma.pseudo.table[[x]] <- tt.epithelial.limma.pseudo.table[[x]] %>% dplyr::filter(!is.na(`Gene Symbol`))
+  # Rename columns
+  tt.epithelial.limma.pseudo.table[[x]] <- dplyr::rename(tt.epithelial.limma.pseudo.table[[x]],
+                                                         "Adjusted P-Value" = adj.P.Val,
+                                                         "Average Expression" = AveExpr,
+                                                         "log2 Fold Change" = logFC,
+                                                         "t Statistic" = t)
+  # Reorder columns
+  tt.epithelial.limma.pseudo.table[[x]] <- tt.epithelial.limma.pseudo.table[[x]] %>% dplyr::select("Gene Symbol", "Adjusted P-Value", "t Statistic", "Average Expression", "log2 Fold Change")
+  # Round numeric columns
+  tt.epithelial.limma.pseudo.table[[x]][] <- lapply(tt.epithelial.limma.pseudo.table[[x]], function(column) {
+    if (is.numeric(column)) {
+      as.character(pref.round(column)) # Convert to character to preserve formatting
+    } else {
+      column # Leave non-numeric columns unchanged
+    }
+  })
+  # Save as a table
+  write.csv(tt.epithelial.limma.pseudo.table[[x]], file = paste0("3_output/tt_limmavoom_pseudo/", cluster.name, ".csv"), row.names = F)
+}
+
+# Tidy up the environment
+rm(list = c("x", "cluster.name", "tt.epithelial.limma.pseudo.table"))
+```
+
+* For DESeq2 pseudo-bulked
+```{r}
+tt.epithelial.DESeq2.pseudo.table <- list()
+for(x in names(tt.epithelial.DESeq2.pseudo)){
+  cluster.name <- gsub(" ", "_", x)
+  # Add a column of gene names
+  tt.epithelial.DESeq2.pseudo.table[[x]] <- rownames_to_column(tt.epithelial.DESeq2.pseudo[[x]], "Gene Symbol")
+  # Name the new list element
+  names(tt.epithelial.DESeq2.pseudo.table[x]) <- x
+  # Remove unnecessary columns
+  tt.epithelial.DESeq2.pseudo.table[[x]] <- tt.epithelial.DESeq2.pseudo.table[[x]] %>% dplyr::select(-c("pvalue", "lfcSE"))
+  # Remove rows where symbol = NA
+  tt.epithelial.DESeq2.pseudo.table[[x]] <- tt.epithelial.DESeq2.pseudo.table[[x]] %>% dplyr::filter(!is.na(`Gene Symbol`))
+  # Rename columns
+  tt.epithelial.DESeq2.pseudo.table[[x]] <- dplyr::rename(tt.epithelial.DESeq2.pseudo.table[[x]],
+                                                          "Adjusted P-Value" = padj,
+                                                          "Average Expression" = baseMean,
+                                                          "log2 Fold Change" = log2FoldChange,
+                                                          "t Statistic" = stat)
+  # Reorder columns
+  tt.epithelial.DESeq2.pseudo.table[[x]] <- tt.epithelial.DESeq2.pseudo.table[[x]] %>% dplyr::select("Gene Symbol", "Adjusted P-Value", "t Statistic", "Average Expression", "log2 Fold Change")
+  # Round numeric columns
+  tt.epithelial.DESeq2.pseudo.table[[x]][] <- lapply(tt.epithelial.DESeq2.pseudo.table[[x]], function(column) {
+    if (is.numeric(column)) {
+      as.character(pref.round(column)) # Convert to character to preserve formatting
+    } else {
+      column # Leave non-numeric columns unchanged
+    }
+  })
+  # Save as a table
+  write.csv(tt.epithelial.DESeq2.pseudo.table[[x]], file = paste0("3_output/tt_DESeq2_pseudo/", cluster.name, ".csv"), row.names = F)
+}
+
+# Tidy up the environment
+rm(list = c("x", "cluster.name", "tt.epithelial.DESeq2.pseudo.table"))
+```
+
+### GSEA results
+* For limma not pseudo-bulked
+```{r}
+gsea.epithelial.limma.table <- list()
+
+for(b in names(gsea.epithelial.limma)){
+  # Extract the table from limma results
+  gsea.epithelial.limma.table[[b]] <- gsea.epithelial.limma[[b]]
+  # Remove unwanted columns
+  gsea.epithelial.limma.table[[b]] <- gsea.epithelial.limma.table[[b]][, -c("pval", "log2err", "ES", "NES")]
+  # Rename columns
+  gsea.epithelial.limma.table[[b]] <- dplyr::rename(gsea.epithelial.limma.table[[b]],
+                                                    "Adjusted P-Value" = padj,
+                                                    "Size" = size,
+                                                    "Leading Edge" = leadingEdge,
+                                                    "Reactome Pathway Term" = pathway)
+  # Reorder columns
+  gsea.epithelial.limma.table[[b]] <- gsea.epithelial.limma.table[[b]] %>% dplyr::select("Reactome Pathway Term", "Adjusted P-Value", "Size", "Leading Edge")
+  # Collapse leading edge from list into vector
+  gsea.epithelial.limma.table[[b]]$`Leading Edge` <- sapply(gsea.epithelial.limma.table[[b]]$`Leading Edge` , function(x) paste(x, collapse = ", "))
+  # Sort by pathway alphabetically
+  # gsea.epithelial.limma.table[[b]] <- gsea.epithelial.limma.table[[b]][order(gsea.epithelial.limma.table[[b]]$`Reactome Pathway Term`), ]
+  # Sort by adjusted P-value
+  gsea.epithelial.limma.table[[b]] <- gsea.epithelial.limma.table[[b]] %>% dplyr::arrange("Adjusted P-Value")
+  # Round adjusted P-values to 3 d.p
+  gsea.epithelial.limma.table[[b]] <- lapply(gsea.epithelial.limma.table[[b]], function(column) {
+    if (is.numeric(column)) {
+      as.character(pref.round(column)) # Convert to character to preserve formatting
+    } else {
+      column # Leave non-numeric columns unchanged
+    }
+  })
+  # Write output
+  write.csv(gsea.epithelial.limma.table[[b]], file = paste0("3_output/gsea_limmavoom/", gsub(" ", "_", b), ".csv"), row.names = F)
+}
+
+# Tidy up the environment
+rm(list = c("b", "gsea.epithelial.limma.table"))
+```
+
+* For limma pseudo-bulked
+```{r}
+gsea.epithelial.limma.pseudo.table <- list()
+
+for(b in names(gsea.epithelial.limma.pseudo)){
+  # Extract the table from limma results
+  gsea.epithelial.limma.pseudo.table[[b]] <- gsea.epithelial.limma.pseudo[[b]]
+  # Remove unwanted columns
+  gsea.epithelial.limma.pseudo.table[[b]] <- gsea.epithelial.limma.pseudo.table[[b]][, -c("pval", "log2err", "ES", "NES")]
+  # Rename columns
+  gsea.epithelial.limma.pseudo.table[[b]] <- dplyr::rename(gsea.epithelial.limma.pseudo.table[[b]],
+                                                           "Adjusted P-Value" = padj,
+                                                           "Size" = size,
+                                                           "Leading Edge" = leadingEdge,
+                                                           "Reactome Pathway Term" = pathway)
+  # Reorder columns
+  gsea.epithelial.limma.pseudo.table[[b]] <- gsea.epithelial.limma.pseudo.table[[b]] %>% dplyr::select("Reactome Pathway Term", "Adjusted P-Value", "Size", "Leading Edge")
+  # Collapse leading edge from list into vector
+  gsea.epithelial.limma.pseudo.table[[b]]$`Leading Edge` <- sapply(gsea.epithelial.limma.pseudo.table[[b]]$`Leading Edge` , function(x) paste(x, collapse = ", "))
+  # Sort by pathway alphabetically
+  # gsea.epithelial.limma.pseudo.table[[b]] <- gsea.epithelial.limma.pseudo.table[[b]][order(gsea.epithelial.limma.pseudo.table[[b]]$`Reactome Pathway Term`), ]
+  # Sort by adjusted P-value
+  gsea.epithelial.limma.pseudo.table[[b]] <- gsea.epithelial.limma.pseudo.table[[b]] %>% dplyr::arrange("Adjusted P-Value")
+  # Round adjusted P-values to 3 d.p
+  gsea.epithelial.limma.pseudo.table[[b]] <- lapply(gsea.epithelial.limma.pseudo.table[[b]], function(column) {
+    if (is.numeric(column)) {
+      as.character(pref.round(column)) # Convert to character to preserve formatting
+    } else {
+      column # Leave non-numeric columns unchanged
+    }
+  })
+  # Write output
+  write.csv(gsea.epithelial.limma.pseudo.table[[b]], file = paste0("3_output/gsea_limmavoom_pseudo/", gsub(" ", "_", b), ".csv"), row.names = F)
+}
+
+# Tidy up the environment
+rm(list = c("b", "gsea.epithelial.limma.pseudo.table"))
+```
+
+* For DESeq2 pseudo-bulked
+```{r}
+gsea.epithelial.DESeq2.pseudo.table <- list()
+
+for(b in names(gsea.epithelial.DESeq2.pseudo)){
+  # Extract the table from limma results
+  gsea.epithelial.DESeq2.pseudo.table[[b]] <- gsea.epithelial.DESeq2.pseudo[[b]]
+  # Remove unwanted columns
+  gsea.epithelial.DESeq2.pseudo.table[[b]] <- gsea.epithelial.DESeq2.pseudo.table[[b]][, -c("pval", "log2err", "ES", "NES")]
+  # Rename columns
+  gsea.epithelial.DESeq2.pseudo.table[[b]] <- dplyr::rename(gsea.epithelial.DESeq2.pseudo.table[[b]],
+                                                            "Adjusted P-Value" = padj,
+                                                            "Size" = size,
+                                                            "Leading Edge" = leadingEdge,
+                                                            "Reactome Pathway Term" = pathway)
+  # Reorder columns
+  gsea.epithelial.DESeq2.pseudo.table[[b]] <- gsea.epithelial.DESeq2.pseudo.table[[b]] %>% dplyr::select("Reactome Pathway Term", "Adjusted P-Value", "Size", "Leading Edge")
+  # Collapse leading edge from list into vector
+  gsea.epithelial.DESeq2.pseudo.table[[b]]$`Leading Edge` <- sapply(gsea.epithelial.DESeq2.pseudo.table[[b]]$`Leading Edge` , function(x) paste(x, collapse = ", "))
+  # Sort by adjusted P-Value
+  gsea.epithelial.DESeq2.pseudo.table[[b]] <- gsea.epithelial.DESeq2.pseudo.table[[b]] %>% dplyr::arrange("Adjusted P-Value")
+  # Round adjusted P-values to 3 d.p
+  gsea.epithelial.DESeq2.pseudo.table[[b]] <- lapply(gsea.epithelial.DESeq2.pseudo.table[[b]], function(column) {
+    if (is.numeric(column)) {
+      as.character(pref.round(column)) # Convert to character to preserve formatting
+    } else {
+      column # Leave non-numeric columns unchanged
+    }
+  })
+  # Write output
+  write.csv(gsea.epithelial.DESeq2.pseudo.table[[b]], file = paste0("3_output/gsea_DESeq2_pseudo/", gsub(" ", "_", b), ".csv"), row.names = F)
+}
+
+# Tidy up the environment
+rm(list = c("b"))
+```
+
+# Inspect various data for plots
+### Cut out dropout from gene expression to plot cancer cell cluster markers for Thesis
+```{r}
+comp.list <- list(c("Cancer Cells", "Transitional Cells"),
+                  c("Cancer Cells", "Mucous Cells"),
+                  c("Cancer Cells", "Chief Cells"),
+                  c("Cancer Cells", "Undetermined"),
+                  c("Cancer Cells", "Progenitor Cells"),
+                  c("Cancer Cells", "Parietal Cells"),
+                  c("Cancer Cells", "Antral Pit Cells"),
+                  c("Cancer Cells", "Other Pit Cells"),
+                  c("Cancer Cells", "Corpus Pit Cells")
+)
+
+# Plot Cdh1, filtered
+i <- "Cdh1"
+das.dat.epithelial.filtered <- subset(das.dat.epithelial, cells = WhichCells(das.dat.epithelial, expression = Cdh1 > 0))
+# das.dat.epithelial.filtered <- das.dat.epithelial
+
+# das.dat.epithelial.filtered <- das.dat.epithelial
+# Fetch the Cdh1 expression data and corresponding metadata (identity information)
+expression_data <- FetchData(das.dat.epithelial.filtered, vars = i)
+metadata <- das.dat.epithelial.filtered@meta.data
+
+# Combine expression data and metadata into a single data frame
+plot_data <- cbind(expression_data, metadata)
+
+means <- plot_data %>%
+  group_by(type.manual.v1) %>%
+  summarize(mean_expression = mean(!!sym(i)))
+plot_data$type.manual.v1 <- factor(
+  plot_data$type.manual.v1,
+  levels = means$type.manual.v1[order(means$mean_expression)]
+)
+
+# Step 3: Create a violin plot using ggplot2, with a comparison between "Cancer Cells" and "Antral Pit Cells"
+p <- ggplot(plot_data, aes(x = type.manual.v1, y = !!sym(i), fill = type.manual.v1)) +
+  geom_violin(trim = FALSE) +  # Violin plot to show distribution of i expression
+  geom_jitter(shape = 16, position = position_jitter(0.2), size = 1, alpha = 0.2) +  # Add individual points
+  stat_compare_means(comparisons = comp.list, method = "t.test", label = "p.signif") +  # Add comparison
+  labs(title = paste0(i, " Expression in Cancer Cells vs Other Epithelial Cells"), x = "Cell Type", y = paste0(i, " Expression")) +
+  stat_summary(fun = mean, geom = "crossbar",
+               position = position_dodge(width = 0.9),
+               width = 0.8, color = "black", linewidth = 0.2, linetype = "dashed") +
+  theme_minimal() +
+  scale_y_continuous(limits = c(0, NA), expand = expansion(mult = 0.2)) +  # Lower limit 0, dynamic upper limit
+  theme(
+    panel.background = element_rect(fill = "white", color = NA),  # White background
+    plot.background = element_rect(fill = "white", color = NA),   # White plot area
+    panel.grid.major.x = element_line(color = "grey80", size = 0.5),  # Restore major x-axis gridlines
+    panel.grid.minor.x = element_line(color = "grey90", size = 0.3),  # Restore minor x-axis gridlines
+    panel.grid.major.y = element_line(color = "grey90", size = 0.3),  # Restore major y-axis gridlines
+    legend.position = "none",                    # Remove legend
+    axis.text.x = element_text(angle = 45, hjust = 1),               # Remove x-axis text (tick labels)
+    axis.title.x = element_blank(),              # Remove x-axis title
+    axis.ticks.x = element_blank(),              # Remove x-axis ticks
+    text = element_text(family = "Times New Roman", size = 9),  # Set font for all text
+    plot.title = element_text(face = "bold", size = 12)         # Make title bold
+  )
+
+
+# Step 4: Show the plot
+print(p)
+# ggsave(filename = paste0(i, "_expression_violin_cancer_vs_all.png"), p, dpi = 300, width = 3000, height = 2000, units = "px")
+ggsave(filename = paste0("3_output/", i, "_expression_violin_cancer_vs_all.png"), p, width = 15.91, height = 12, dpi = 600, units = "cm", bg = "white")
+
+
+```
+
+```{r}
+# Load necessary libraries
+library(dplyr)
+library(ggplot2)
+library(ggpubr)
+
+# Perform t-tests and adjust p-values for multiple comparisons
+p_values <- sapply(comp.list, function(comp) {
+  group1 <- plot_data %>% filter(type.manual.v1 == comp[1]) %>% pull(!!sym(i))
+  group2 <- plot_data %>% filter(type.manual.v1 == comp[2]) %>% pull(!!sym(i))
+  
+  test_result <- t.test(group1, group2)  # Perform t-test
+  test_result$p.value  # Extract p-value
+})
+
+# Adjust p-values using Benjamini-Hochberg correction
+p_adjusted <- p.adjust(p_values, method = "BH")  # Can also use "bonferroni"
+
+# Define spacing for comparison bars
+comp_y_positions <- max(plot_data[[i]], na.rm = TRUE) * 1.1  # Start above max data point
+step_increase <- (max(plot_data[[i]], na.rm = TRUE) - min(plot_data[[i]], na.rm = TRUE)) * 0.2  # More space between bars
+
+# Create a data frame for significance bars
+comp_df <- data.frame(
+  group1 = sapply(comp.list, function(comp) comp[1]),
+  group2 = sapply(comp.list, function(comp) comp[2]),
+  y.position = comp_y_positions + (seq_along(comp.list) - 1) * step_increase,  # Increment y positions
+  p.adj = signif(p_adjusted, 3)  # Round p-values to 3 significant figures
+)
+
+# Violin plot with adjusted p-value significance bars
+p <- ggplot(plot_data, aes(x = type.manual.v1, y = !!sym(i), fill = type.manual.v1)) +
+  geom_violin(trim = FALSE) +
+  geom_jitter(shape = 16, position = position_jitter(0.2), size = 1, alpha = 0.2) +
+  stat_summary(fun = mean, geom = "crossbar",
+               position = position_dodge(width = 0.9),
+               width = 0.8, color = "black", linewidth = 0.2, linetype = "dashed") +
+  labs(title = paste0(i, " Expression in Cancer Cells vs Other Epithelial Cells"),
+       x = "Cell Type", y = paste0(i, " Expression")) +
+  theme_minimal() +
+  scale_y_continuous(limits = c(0, NA), expand = expansion(mult = 0.3)) +  # Extra vertical space
+  theme(
+    panel.background = element_rect(fill = "white", color = NA),
+    plot.background = element_rect(fill = "white", color = NA),
+    panel.grid.major.x = element_line(color = "grey80", size = 0.5),
+    panel.grid.minor.x = element_line(color = "grey90", size = 0.3),
+    panel.grid.major.y = element_line(color = "grey90", size = 0.3),
+    legend.position = "none",
+    axis.text.x = element_text(angle = 45, hjust = 1, size = 9),  # Match font size
+    axis.title.x = element_blank(),
+    axis.ticks.x = element_blank(),
+    text = element_text(family = "Times New Roman", size = 9),
+    plot.title = element_text(face = "bold", size = 12)
+  ) +
+  stat_pvalue_manual(comp_df, label = "p.adj", inherit.aes = FALSE, size = 2)  # Match x-axis label size
+
+# Show the plot
+print(p)
+
+# Save the plot
+ggsave(filename = paste0("3_output/", i, "_expression_violin_cancer_vs_all.png"), p, width = 15.91, height = 12, dpi = 600, units = "cm", bg = "white")
+
+```
+
+### New metadata to compare Cancer cells to all other cells
+```{r}
+# Assign the 'cancer.vs.all' column, setting 'Undetermined' values as NA
+das.dat.epithelial$cancer.vs.all <- ifelse(
+  das.dat.epithelial$type.manual.v1 == "Cancer Cells", 
+  "Cancer Cells", 
+  ifelse(das.dat.epithelial$type.manual.v1 == "Undetermined", 
+         NA,  # Set Undetermined to NA
+         "Epithelial Cells")
+)
+
+# Convert annotation to factor, including NAs
+das.dat.epithelial$cancer.vs.all <- factor(das.dat.epithelial$cancer.vs.all, 
+                                           levels = c("Cancer Cells", "Epithelial Cells"))
+
+# Verify the new column, including NA counts
+table(das.dat.epithelial$cancer.vs.all, useNA = "ifany")
+```
+
+
+
+# Cancer Markers for Thesis 3.3.3 as a loop
+* Multiple different clusters here that pop out the same plot, so be careful that you rename it
+```{r, warning = F}
+# Create a vector of names of genes of interest (GOI)
+# Group X: Cdh1
+markers <- c("Cdh1")
+# Group 1: Misc cancer cluster markers
+# markers <- c("Cdh1", "Trp53", "Cd44", "Ctnnb1", "Mki67", "Top2a", "Sox2", "Prom1", "Epcam", "Clu")
+# Group 2: Integrins
+# markers <- c("Itga2", "Itga3", "Itga5", "Itgav", "Itgb1", "Itgb6")
+# Group 3: Claudins and Laminins
+# markers <- c("Cldn3", "Cldn4", "Cldn7", "Lama3", "Lamb2", "Lamb3", "Lamc1", "Lamc2")
+# Group 4: Markers of Electron Transport and Oxidative Phosphorylation. Nd and Nduf are Mt Complex 1 genes, Prkaa are AMPK genes, others are non-specific OXPHOS markers.
+# markers <- c("mt-Nd1", "mt-Nd2", "Ndufa9", "Ndufb8", "Prkaa1", "Prkaa2", "Sirt3", "Ppargc1a", "Tfam")
+# Cut down to just the most informative ones
+# markers <- c("mt-Nd1", "mt-Nd2", "mt-Nd3", "mt-Nd4", "mt-Nd5", "mt-Nd6")
+# Group 5: Markers of Canonical and Non-Canonical Wnt Signalling. Birc5 is survivin, Wwtr1 is TAZ
+# markers <- c("Wnt1", "Wnt2", "Wwtr1", "Yap1", "Tead1", "Fat1", "Ctnnb1", "Birc5")
+# Cut down to just the most informative ones
+# markers <- c("Wwtr1", "Yap1", "Tead1", "Fat1", "Ctnnb1", "Birc5")
+# Group 6: Markers of RHO GTPase Signalling. Ptk2 is FAK
+# markers <- c("Rhoa", "Rhob", "Rhog", "Rac1", "Rock1", "Cdc42", "Ptk2")
+# Group 7: Markers of MAPK Signalling. Map2k1 is Mek1, Map2k2 is Mek2. Mapk1 is Erk2, Mapk3 is Erk1.
+# markers <- c("Hras", "Kras", "Nras", "Raf1", "Braf", "Map2k1", "Map2k2", "Mapk1", "Mapk3")
+# Cut down to just the most informative ones
+# markers <- c("Hras", "Kras", "Nras", "Raf1", "Map2k2")
+# Group 8: Markers of Autophagy. Pik3c3 is Vps34. Atp genes are parts of V-ATPase. Atg genes are autophagosome genes.
+# markers <- c("Ppt1", "Pik3c3", "Ulk1", "Ulk2", "Sqstm1", "Atp6v1h", "Atp6v0d1", "Atp6v0a2")
+# markers <- c("Atg3", "Atg4b", "Atg5", "Atg7", "Atg9a", "Atg12", "Atg16l1")
+# Create the list object
+marker.vln.plots <- list()
+# Create the object to define significance comparisons
+comp.list <- list(c("Cancer Cells", "Epithelial Cells"))
+
+for (i in markers) {
+  # Check if the marker exists in the Seurat object
+  if (i %in% rownames(das.dat.epithelial)) {
+    # Filter based on the gene expression for "Cdh1" and "Trp53"
+    if (i %in% c("Cdh1", "Trp53")) {
+      # Get the expression data for the gene
+      gene_expression <- FetchData(das.dat.epithelial, vars = i)
+      
+      # Filter cells where the expression is greater than 0
+      das.dat.epithelial.filtered <- subset(
+        das.dat.epithelial,
+        cells = colnames(das.dat.epithelial)[gene_expression[[i]] > 0]  # Subset cells based on gene expression
+      )
+    } else {
+      # If it's not Cdh1 or Trp53, just keep the data as is
+      das.dat.epithelial.filtered <- das.dat.epithelial
+    }
+  } else {
+    message(paste("Warning: Marker", i, "not found in Seurat object. Skipping."))
+    das.dat.epithelial.filtered <- das.dat.epithelial  # Continue with original data if marker is missing
+  }
+  
+  # Fetch the GOI expression data and corresponding metadata (identity information)
+  expression_data <- FetchData(das.dat.epithelial.filtered, vars = i)
+  metadata <- das.dat.epithelial.filtered@meta.data
+  # Combine expression data and metadata into a single data frame
+  plot_data <- cbind(expression_data, metadata)
+  means <- plot_data %>%
+    group_by(type.manual.v1) %>%
+    summarize(mean_expression = mean(!!sym(i)))
+  plot_data$type.manual.v1 <- factor(
+    plot_data$type.manual.v1,
+    levels = means$type.manual.v1[order(means$mean_expression)]
+  )
+  # Generate plots
+  marker.vln.plots[[i]] <- ggplot(na.omit(plot_data), aes(x = cancer.vs.all, y = !!sym(i), fill = cancer.vs.all)) +
+    geom_violin(trim = FALSE) +  # Violin plot to show distribution of i expression
+    geom_jitter(shape = 16, position = position_jitter(0.2), size = 1, alpha = 0.2, colour = "black") +  # Add individual points
+    stat_compare_means(comparisons = comp.list, method = "t.test", label = "p.format", size = 3) +  # Add comparison
+    labs(title = paste0(i), x = NULL, y = paste0(i, " Expression")) +
+    stat_summary(fun = mean, geom = "crossbar",
+                 position = position_dodge(width = 0.9),
+                 width = 0.8, color = "black", linewidth = 0.2, linetype = "dashed")
+}
+
+# Combine plots
+# Function to style individual plots, prevent ggsignif cut-off, and set y-axis lower limit to 0
+style <- function(plot) {
+  plot +
+    scale_y_continuous(limits = c(0, NA), expand = expansion(mult = 0.2)) +  # Lower limit 0, dynamic upper limit
+    theme(
+      panel.background = element_rect(fill = "white", color = NA),  # White background
+      plot.background = element_rect(fill = "white", color = NA),   # White plot area
+      panel.grid.major.x = element_line(color = "grey80", size = 0.5),  # Restore major x-axis gridlines
+      panel.grid.minor.x = element_line(color = "grey90", size = 0.3),  # Restore minor x-axis gridlines
+      panel.grid.major.y = element_line(color = "grey90", size = 0.3),  # Restore major y-axis gridlines
+      legend.position = "none",                    # Remove legend
+      axis.text.x = element_blank(),               # Remove x-axis text (tick labels)
+      axis.title.x = element_blank(),              # Remove x-axis title
+      axis.ticks.x = element_blank(),              # Remove x-axis ticks
+      text = element_text(family = "Times New Roman", size = 9),  # Set font for all text
+      plot.title = element_text(face = "bold", size = 9)         # Make title bold
+    )
+}
+# Extract the legend from the last plot in the list and update its title
+legend <- cowplot::get_legend(
+  marker.vln.plots[[length(marker.vln.plots)]] + 
+    guides(fill = guide_legend(title = "Cell Type")) +  # Set legend title
+    theme(legend.title = element_text(face = "bold", family = "Times New Roman", size = 9))  # Bold legend title
+)
+# Apply the function to all plots in the list
+processed_plots <- lapply(marker.vln.plots, style)
+# Determine number of columns dynamically (adjust as needed)
+num_cols <- min(length(processed_plots), 2)  # Max no. of columns, adjust as needed
+# Arrange the plots in a grid with a white background
+plot.grid <- cowplot::plot_grid(
+  plotlist = processed_plots, ncol = num_cols
+)
+# Combine the plots and the legend into a final plot with a white background
+final_plot <- cowplot::plot_grid(
+  plot.grid, legend, ncol = 1, rel_heights = c(1, 0.1),
+  align = "v") +
+  theme(plot.background = element_rect(fill = "white", color = NA)) + # White background for final plot
+  ggtitle("Gene Expression in Cancer Cells vs Other Epithelial Cells") +  # Add shared title
+  theme(plot.title = element_text(hjust = 0, size = 12, face = "bold", family = "Times New Roman"))
+# Save the final plot with the shared legend (height needs to start at 6cm, + 3cm per row)
+ggsave("3_output/Cancer_markers_X.png", final_plot, width = 15.91, height = 15, units = "cm", bg = "white")
+
+# Tidy up the environment
+rm(list = c("i", "gene_expression",
+            "metadata", "plot_data", "means",
+            "processed_plots", "num_cols", "final_plot", "plot.grid"))
+```
+
+
+# Putative Cancer Stem Cell (CSC) Markers for Thesis
+```{r}
+# Define markers
+markers <- c("Wnt1", "Wnt3", "Nanog", "Nog", "Rspo2", "Cxcr2")
+
+# Create individual violin plots with custom y-axis title
+plots <- lapply(markers, function(marker) {
+  VlnPlot(das.dat.epithelial, features = marker) +
+    labs(y = paste(marker, "Expression")) +  # Set dynamic y-axis title
+    theme(axis.title.x = element_blank())  # Remove x-axis title
+})
+
+# Apply styling to all plots
+for (i in 1:6) {
+  plots[[i]] <- plots[[i]] + theme_minimal() +
+    theme(
+      panel.background = element_rect(fill = "white", color = NA),  # White background
+      plot.background = element_rect(fill = "white", color = NA),   # White plot area
+      panel.grid.major.x = element_line(color = "grey80", size = 0.5),  # Restore major x-axis gridlines
+      panel.grid.minor.x = element_line(color = "grey90", size = 0.3),  # Restore minor x-axis gridlines
+      panel.grid.major.y = element_line(color = "grey90", size = 0.3),  # Restore major y-axis gridlines
+      legend.position = "none",  # Remove legend
+      axis.text.x = element_text(angle = 45, hjust = 1),  # Adjust x-axis text angle
+      axis.title.x = element_blank(),  # Remove x-axis title
+      axis.ticks.x = element_blank(),  # Remove x-axis ticks
+      text = element_text(family = "Times New Roman", size = 9),  # Set font
+      plot.title = element_text(face = "bold", size = 9)
+    )
+}
+
+# Remove x-axis labels from the top four plots
+for (i in 1:4) {
+  plots[[i]] <- plots[[i]] + theme(axis.text.x = element_blank(),
+                                   axis.ticks.x = element_blank())
+}
+
+# Arrange plots in a 2-column, 3-row layout
+plot_layout <- (plots[[1]] | plots[[2]]) /
+  (plots[[3]] | plots[[4]]) /
+  (plots[[5]] | plots[[6]]) +
+  plot_annotation(title = "Cancer Stem Cell Marker Gene Expression in Epithelial and Undetermined Cells", theme = theme(
+    plot.title = element_text(hjust = 0, size = 12, face = "bold", family = "Times New Roman")
+  ))
+
+# Display final plot arrangement
+plot_layout
+
+ggsave(filename = "3_output/cancer_stem_cell_markers.png", plot_layout, width = 15.91, height = 15, dpi = 600, units = "cm", bg = "white")
+
+# Tidy up the environment
+rm(list = c("i", "plots", "plot_layout", "markers"))
+```
+
+# Combine annotations from original clusters and epithelial subclusters
+```{r}
+# Step 1: Convert factor annotations to characters to avoid NA issues
+das.dat@meta.data$type.manual.v1 <- as.character(das.dat@meta.data$type.manual.v1)
+das.dat.epithelial@meta.data$type.manual.v1 <- as.character(das.dat.epithelial@meta.data$type.manual.v1)
+
+# Step 2: Create a new metadata column in das.dat for the combined annotations
+# Initialize it with the existing annotations from das.dat
+das.dat@meta.data$type.manual.v1_combined <- das.dat@meta.data$type.manual.v1
+
+# Step 3: Identify common cells (cells in both das.dat and das.dat.epithelial)
+common_cells <- intersect(rownames(das.dat@meta.data), rownames(das.dat.epithelial@meta.data))
+
+# Step 4: Transfer annotations from das.dat.epithelial to das.dat for the common cells
+das.dat@meta.data[common_cells, "type.manual.v1_combined"] <- das.dat.epithelial@meta.data[common_cells, "type.manual.v1"]
+
+# Step 5: (Optional) Convert the new column back to a factor if necessary
+das.dat@meta.data$type.manual.v1_combined <- factor(das.dat@meta.data$type.manual.v1_combined)
+
+# Step 6: Verify the result
+table(das.dat@meta.data$type.manual.v1_combined)
+
+# Step 1: Set the active identity to the new annotation column
+# Ensure the new annotation is a factor before setting it as the active identity
+das.dat@meta.data$type.manual.v1_combined <- factor(das.dat@meta.data$type.manual.v1_combined)
+
+# Set the active identity to the new column
+das.dat <- SetIdent(das.dat, value = "type.manual.v1_combined")
+
+# Step 2: Plot UMAP
+# Create a UMAP plot colored by the new active identity (type.manual.v1_combined)
+DimPlot(das.dat, reduction = "umap", label = TRUE) + theme(legend.position = "none")
+ggsave("UMAP_combined_annotations.png", width = 6000, height = 4000, units = "px")
+
+table(das.dat@meta.data$type.manual.v1_combined)
+```
+
+# UMAP - new annotations for Thesis 3.3.3
+```{r}
+# Define new labels for the treatment groups
+new_labels <- c("Das - control" = "Control",
+                "Das - drug" = "Dasatinib") # Modify accordingly
+
+# Generate UMAP plot
+p <- DimPlot(das.dat, reduction = "umap", label = TRUE, repel = TRUE, group.by = "type.manual.v1_combined", split.by = "treat.ident", pt.size = 0.1, label.size = 2.1) +
+  theme_minimal() +
+  theme(
+    panel.grid = element_blank(), # Remove gridlines
+    axis.line = element_line(), # Keep axis lines
+    axis.ticks = element_blank(), # Remove axis ticks
+    axis.text = element_blank(), # Remove axis tick labels
+    text = element_text(family = "Times New Roman", size = 12), # Set font for all text
+    plot.title = element_text(face = "bold", size = 12, family = "Times New Roman"), # Title styling
+    legend.position = "bottom", # Move legend below the plot
+    legend.key.size = unit(0.5, "lines"), # Make legend more compact
+    legend.text = element_text(size = 9, family = "Times New Roman"), # Legend text size
+    legend.title = element_text(size = 9, family = "Times New Roman", face = "bold"), # Bold legend title
+    strip.text = element_text(family = "Times New Roman", size = 12, face = "bold") # Facet panel title styling
+  ) +
+  labs(title = "Annotated Clusters by Treatment") +
+  facet_wrap(~treat.ident, labeller = as_labeller(new_labels)) # Rename panel titles
+
+# Save the plot with A4 width minus margins
+ggsave(file = "3_output/Annotated_Clusters_by_Treatment.png", plot = p, width = 15.92, height = 10, units = "cm", dpi = 600)
+
+# Tidy up the environment
+rm("new_labels")
+```
+
+
+# Create heatmaps of gene expression in a pathway, comparing expression pre and post treatment.
+### Extract cancer cells and pathways for heatmap
+```{r}
+# Subset the Seurat object to only include Cancer Cells
+cancer_cells <- subset(das.dat.epithelial, subset = type.manual.v1 == "Cancer Cells")
+
+# Extract gene expression matrix (raw counts)
+cancer_expression <- GetAssayData(cancer_cells, slot = "counts")
+
+# View extracted expression data
+print(dim(cancer_expression))  # Check the dimensions (genes x cells)
+head(cancer_expression)  # View the first few rows of gene expression
+
+# Normalise with edgeR and limma
+dge <- DGEList(counts = cancer_expression)
+dge <- calcNormFactors(dge)
+dge_voom <- voom(dge, plot = FALSE)
+expDat <- dge_voom$E
+# Need to work out whether to plot expDat or cancer_expression in the next bit.
+
+# Extract cancer pathways
+cancer_paths <- gsea.epithelial.limma.pseudo[["Cancer Cells"]]
+rownames(cancer_paths) <- cancer_paths$pathway
+```
+
+### Define col side colours and column order
+```{r}
+# x is the treatment annotation of the cells
+x <- cancer_cells@meta.data$treat.ident 
+
+# Convert factor levels to numeric
+x_numeric <- as.numeric(x)  
+# Generate a color vector with two colors from the plasma palette - for treatment
+color_palette <- plasma(2, direction = 1)
+# Assign colors based on factor levels
+cc <- matrix(color_palette[x_numeric], nrow = length(x))
+# Transpose and rename elements of cc
+cc <- cc %>% t(.)
+colnames(cc) <- colnames(cancer_cells)
+rownames(cc) <- c("Treatment")
+# Create column orderer to order by treatment
+# colord <- order(cc)
+
+# Define pathways of interest
+# Large list
+#pathways <- c("The citric acid (TCA) cycle and respiratory electron transport", "Respiratory electron transport", "Beta-catenin independent WNT signaling", "RHO GTPase Effectors", "MAPK family signaling cascades", "Negative regulation of MAPK pathway", "Programmed Cell Death", "Autophagy", "MAPK6/MAPK4 signaling", "Macroautophagy", "Selective autophagy", "MAPK1/MAPK3 signaling", "RAF/MAP kinase cascade", "Complex I biogenesis", "Signaling by WNT", "RAF activation", "MAPK targets/ Nuclear events mediated by MAP kinases", "Pyruvate metabolism and Citric Acid (TCA) cycle", "MTOR signalling", "EGFR downregulation")
+# List for thesis
+pathways <- c("Respiratory electron transport", "Complex I biogenesis", "Beta-catenin independent WNT signaling", "Signaling by WNT", "RHO GTPase Effectors", "MAPK family signaling cascades", "RAF activation", "Autophagy", "Selective autophagy")
+
+# Tidy up the environment
+rm(list = c("x", "x_numeric", "color_palette"))
+```
+
+
+### Plot heatmaps
+```{r}
+for(i in pathways){
+  # Extract current pathway genes
+  gene_vector <- cancer_paths[pathway == i, leadingEdge] %>% strsplit(., ", ") %>% unlist(.)
+  
+  # Create the matrix for plotting
+  # Cut down on extreme values and scale the data.
+  yy <- apply(expDat, 1, scale, scale = TRUE) %>% t()
+  colnames(yy) <- colnames(expDat)
+  yy[yy > 3] <- 3
+  yy[yy < -3] <- -3
+  # Cut down to pathway genes
+  yy <- yy[gene_vector,]
+  
+  # Create the singular value decomposition
+  sY <- svd(yy)
+  # Extract the first eigenvalue as the metagene
+  mgY <- sY$v[ , 1]
+  # Create a colour vector for metagene value
+  mgcols <- as.factor(mgY) %>% as.numeric(.) %>% plasma(length(table(.)), direction = 1)[.] %>% matrix(., nrow = 1)
+  colnames(mgcols) <- colnames(yy)
+  # Add the metagene as a row in colSideColors
+  cc2 <- rbind(cc, mgcols)
+  rownames(cc2) <- c("Treatment", "Metagene Value")
+  # Create a column orderer to order by metagene value
+  colord <- order(mgY)
+  
+  # Actually plot the thing
+  png(paste0("3_output/pathway_heatmaps_limma/", gsub("/", "_", i), "_heatmap.png"), width = 204.92, height = 190, units = "mm", res = 600)
+  par(cex.axis = 1, cex.lab = 1, cex.main = 1, mar = c(0, 0, 0, 0)) # mar = c(bottom, left, top, right)
+  heatmap.mik(yy[, colord],
+              trace = 'none',
+              scale = 'none',
+              
+              # Colours
+              col = bluered(50),
+              ColSideColors = cc2[, colord],
+              
+              # Axes (denodrograms and labels)
+              Colv = FALSE, Rowv = TRUE, dendrogram = 'none',
+              main = i,
+              xlab = "Cancer Cells (101)",
+              # ylab = "pathways[i]\nGenes", srtRow = 0,
+              # Setting size of column and row labels, which adjust size down to 60 genes
+              cexRow = 32/max(nrow(yy), 60), # cexCol = 8, 
+              labCol = NA, # labRow = NA,
+              
+              # Key
+              key = T,
+              keysize = 1, density.info = "none",
+              key.ylab = "NA", key.xlab = paste0("Normalised Gene Expression"),
+              
+              # Margins
+              mar = c(2, 10)
+  )
+  # Add an AUC and CHD1 expression legend and larger title.
+  legend(x = 0.39, y = 0.87, legend = c("Control", "Low Metagene Value", "Dasatinib", "High Metagene Value"), fill = c("#0D0887FF", "#0D0887FF", "#F0F921FF", "#F0F921FF"), cex = 0.5, ncol = 2)
+  # title(pathways[i], cex.main = 1)
+  mtext(paste0("Genes"), side = 4, las = 1, line = -2, padj = 5, adj = 0.9)
+  # mtext(strwrap(paste0("Pathway Genes (", length(gene_vector), ")"), width = 12), side = 4, las = 1, line = -2, padj = 5, adj = 0.9)
+  dev.off()
+}
+```
+
+### Calculate Wilcoxon rank-sum p-value and create table and boxplots of distribution
+```{r}
+for(i in pathways){
+  gene_vector <- cancer_paths[pathway == i, leadingEdge] %>% strsplit(., ", ") %>% unlist()
+  
+  yy <- apply(expDat, 1, scale, scale = TRUE) %>% t()
+  colnames(yy) <- colnames(expDat)
+  yy[yy > 3] <- 3
+  yy[yy < -3] <- -3
+  yy <- yy[gene_vector, ]
+  
+  sY <- svd(yy)
+  mgY <- sY$v[, 1]
+  
+  treatment_groups <- cancer_cells@meta.data$treat.ident
+  names(treatment_groups) <- colnames(yy)
+  wilcox_test <- wilcox.test(mgY ~ treatment_groups, alternative = "two.sided", paired = F)
+  cat("Pathway:", i, "- Wilcoxon test p-value:", wilcox_test$p.value, "\n")
+  
+  # Create a data frame for plotting
+  plot_data <- data.frame(mgY = mgY, treatment = treatment_groups)
+  
+  # Generate a box plot
+  p <- ggplot(plot_data, aes(x = treatment, y = mgY, fill = treatment)) +
+    geom_boxplot() +
+    scale_fill_viridis(discrete = TRUE) +
+    theme_minimal() +
+    labs(title = paste("Comparison of mgY means -", i),
+         subtitle = paste("Wilcoxon p-value:", round(wilcox_test$p.value, 5)),
+         x = "Treatment Group", y = "mgY Value") +
+    theme(legend.position = "none")
+  
+  # Save the plot
+  ggsave(filename = paste0("3_output/boxplots/", gsub("/", "_", i), "_boxplot.png"), plot = p, width = 8, height = 6, dpi = 300)
+}
+```
+
+```{r}
+# Initialize results dataframe
+results_df <- data.frame(Pathway = character(), P_Value = numeric(), Mean_Control = numeric(), Mean_Treated = numeric(), stringsAsFactors = FALSE)
+
+for(i in pathways){
+  gene_vector <- cancer_paths[pathway == i, leadingEdge] %>% strsplit(., ", ") %>% unlist()
+  
+  yy <- apply(expDat, 1, scale, scale = TRUE) %>% t()
+  colnames(yy) <- colnames(expDat)
+  yy[yy > 3] <- 3
+  yy[yy < -3] <- -3
+  yy <- yy[gene_vector, ]
+  
+  sY <- svd(yy)
+  mgY <- sY$v[, 1]
+  
+  treatment_groups <- cancer_cells@meta.data$treat.ident
+  names(treatment_groups) <- colnames(yy)
+  wilcox_test <- wilcox.test(mgY ~ treatment_groups, alternative = "two.sided", paired = F)
+  cat("Pathway:", i, "- Wilcoxon test p-value:", wilcox_test$p.value, "\n")
+  
+  # Create a data frame for plotting
+  plot_data <- data.frame(mgY = mgY, treatment = treatment_groups)
+  
+  # Calculate mean mgY for each treatment group
+  mean_values <- plot_data %>% group_by(treatment) %>% summarize(mean_mgY = mean(mgY))
+  
+  # Store results in dataframe
+  results_df <- rbind(results_df, data.frame(Pathway = i, P_Value = wilcox_test$p.value,
+                                             Mean_Control = mean_values$mean_mgY[1],
+                                             Mean_Treated = mean_values$mean_mgY[2]))
+  
+  # Generate a box plot
+  p <- ggplot(plot_data, aes(x = treatment, y = mgY, fill = treatment)) +
+    geom_boxplot() +
+    scale_fill_viridis(discrete = TRUE) +
+    theme_minimal() +
+    labs(title = paste("Comparison of mgY means -", i),
+         subtitle = paste("Wilcoxon p-value:", round(wilcox_test$p.value, 5)),
+         x = "Treatment Group", y = "mgY Value") +
+    theme(legend.position = "none")
+  
+  # Save the plot
+  ggsave(filename = paste0("3_output/boxplots/", gsub("/", "_", i), "_boxplot.png"), plot = p, width = 8, height = 6, dpi = 300)
+}
+
+# Output results to CSV
+write.csv(results_df, "3_output/pathway_metagene_wilcoxon_test_results.csv", row.names = FALSE)
+```
+
+
+```{r}
+# Create a summary table of DE results for thesis
+# Need a column of number of DE genes
+# Need a column of DE genes
+# Need a column of number of fgsea Reactome pathways and collapsed pathways (for visualisation)
+# Need a column of fgsea Reactome pathways
+
+```

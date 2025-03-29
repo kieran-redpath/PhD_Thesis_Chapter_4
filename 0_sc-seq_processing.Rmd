@@ -1,0 +1,234 @@
+---
+title: "0_sc-seq_processing"
+author: "Kieran Redpath"
+date: "2023-10-26"
+output: html_document
+---
+# Setup
+* engine.opts = "-l" means that bash profile features will be executed as they would be in terminal
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(engine.opts = list(bash = "-l"))
+```
+# Process single-cell data in Bash shell
+* Note that these chunks run all code in order every time, and don't send it down to the terminal like R chunks do to the console
+
+* Download with the Illumina BaseSpace downloader
+```{bash}
+# Navigate to an appropriate directory and download the data from BaseSpace
+# cd ~/Volumes/scratch/cancergeneticslab/ConorVaessenScratch/scDrugMice2023/data/
+# bs download run 265770524
+```
+
+# CellRanger pipeline
+* Install cellranger 7.1.0 - releases 7.2.0 and later don't support Gene Expression Flex kit data
+```{bash}
+# Install cellranger 7.1.0
+# wget -O cellranger-7.1.0.tar.gz "https://cf.10xgenomics.com/releases/cell-exp/cellranger-7.1.0.tar.gz?Expires=1699013579&Key-Pair-Id=APKAI7S6A5RYOXBWRPDA&Signature=PWgkXF6ljbLHgj~9kEJZBKeqKBe-O7Rw1LoK~-tF5nv-RqUlqVEsRqMBZUGkmhIW2gLFywnnP6xLzkQoJjQVfnKLDfP~Wp3jR6bQjIXxVol39f3cTC-wmR-85xzNjbEiAzskbw0ktwBBjPYEMu66bsEv~Ymt69XytL-cbaDuNlyTV7td3nTczXLJWm-jhE7-XtC8Cc8yOJvRzS1ZeRUwkRa16f5u3AjVUmxLHHPjnjKCP~hMtBEjyXQ7puZel3QqhFhBD888LqbSDH2vW55uji~wuSk-Yb1aX6lZAbkU2bUWStQsNVb3r2y2PZK-GZU3bMGVu94CxXj6kvJpZ2nGNw__"
+
+# https://cf.10xgenomics.com/releases/cell-exp/cellranger-7.1.0.tar.gz
+
+# Unpack cellranger
+# tar -xzvf cellranger-7.1.0.tar.gz
+
+# Create a path to the application, so you can execute its commands in this bash session
+export PATH=~/Applications/cellranger-7.1.0:$PATH
+```
+
+* Begin processing all data together
+```{bash}
+# Navigate to the appropriate directory
+cd ~/R/sc-seq_mouse/bash/runs
+
+# Note that the code for each of these pools points to a reference file stored in /data, which is in Conor's original directory. This reference file pulls other references from Conor's installation of cellranger. This shouldn't matter, but keep it in mind.
+
+# Begin cellranger multi analysis for pool 1
+cellranger multi --id=scDrugMice2023-pool1 --csv=../data/multi-config-FRP-cr7.0-pool1.csv
+
+# Create  a copy of the dasatinib and dasatinib control mouse data (pool 1) in a separate directory to ensure that it isn't affected by any following code (this might not be the most efficient way to do this, in the future you could instead just call the pool1 outs files)
+cp -r ~/R/sc-seq_mouse/bash/runs/scDrugMice2023-pool1/ ~/R/sc-seq_mouse/bash/dasruns/
+
+# Begin cellranger multi analysis for pool 2
+cellranger multi --id=scDrugMice2023-pool2 --csv=../data/multi-config-FRP-cr7.0-pool2.csv
+
+# Begin cellranger multi analysis for pool 3
+cellranger multi --id=scDrugMice2023-pool3 --csv=../data/multi-config-FRP-cr7.0-pool3.csv
+```
+
+* Combine data from dasatinib samples using cellranger aggr. * You have to use this to combine data from the four dasatinib samples, not just all three pools.
+* cellranger aggr needs a reference file with filepaths to .h5 files for each individual run.
+* cellranger aggr needs a reference file with filepaths to .h5 files for each individual run. Columns are sample_id (containing sample IDs), and molecule_h5, with filepaths to .h5 files
+```{bash}
+# Navigate to the right directory
+cd ~/R/sc-seq_mouse/bash/dasruns
+
+# Run cellranger aggr to combine all samples
+cellranger aggr --id=aggAll --normalize=none --csv=aggr_all_samples.csv
+```
+
+* Combine data from all 12 samples using cellranger aggr
+* cellranger aggr needs a reference file with filepaths to .h5 files for each individual run. Columns are sample_id (containing sample IDs), and molecule_h5, with filepaths to .h5 files
+```{bash}
+# Navigate to the right directory
+cd ~/R/sc-seq_mouse/bash/runs
+
+# Run cellranger aggr to combine all samples
+cellranger aggr --id=aggAll --normalize=none --csv=aggr_all_samples.csv
+```
+
+# Load packages
+```{r, warning=FALSE}
+# Load packages
+library(dplyr)
+library(Seurat)
+library(patchwork)
+
+# Set seed
+set.seed(42)
+```
+
+# Load and annotate data for all samples
+* Pre-process the cellranger output for all samples (as done by Conor)
+```{r}
+# Load the CellRanger output. EVENTUALLY CHANGE THIS TO THE FULLY PROCESSED VERSION AND WHEREVER THAT LIVES, this is just the one Conor has made.
+mouse.dat.10X <- Read10X(data.dir = "~/R/sc-seq_mouse/bash/runs/aggAll/outs/count/filtered_feature_bc_matrix")
+# Initialize the Seurat object with the raw (non-normalized data)
+mouse.dat <- CreateSeuratObject(counts = mouse.dat.10X, project = "druggedMice", names.delim = "-", names.field = 2)
+# Inspect the data
+mouse.dat
+```
+
+* Annotate with useful metadata
+```{r}
+# Add sample identifiers to the data
+mouse.dat <- RenameIdents(mouse.dat,
+                          "1" = "BOMC1",
+                          "2" = "BOMC2",
+                          "3" = "BOMT1",
+                          "4" = "BOMT2",
+                          "5" = "BPFC1",
+                          "6" = "BPFT1",
+                          "7" = "BPMC1",
+                          "8" = "BPMT1",
+                          "9" = "BNFC1",
+                          "10" = "BNFT1",
+                          "11" = "BNMC1",
+                          "12" = "BTMT2")
+mouse.dat@meta.data[["samp.ident"]] <- mouse.dat@active.ident
+
+# Add treatment identifiers to the data
+treat.ident <- mouse.dat@meta.data[["samp.ident"]] %>% as.character(.)
+treat.ident[treat.ident %in% c("BOMT1", "BOMT2")]  <- "Das - drug"
+treat.ident[treat.ident %in% c("BOMC1", "BOMC2")]  <- "Das - control"
+treat.ident[treat.ident %in% c("BPFT1", "BPMT1")]  <- "Ent - drug"
+treat.ident[treat.ident %in% c("BPFC1", "BPMC1")]  <- "Ent - control"
+treat.ident[treat.ident %in% c("BNFT1", "BTMT2")]  <- "Mir - drug"
+treat.ident[treat.ident %in% c("BNFC1", "BNMC1")]  <- "Mir - control"
+mouse.dat@meta.data[["treat.ident"]] <- treat.ident %>% as.factor()
+# Tidy up the environment
+rm(treat.ident)
+
+# Add descriptive names to each sample for plotting
+samp.ident.desc <- mouse.dat@meta.data[["samp.ident"]] %>% as.character(.)
+samp.ident.desc[samp.ident.desc %in% "BOMT1"]  <- "Dasatinib Drugged 1"
+samp.ident.desc[samp.ident.desc %in% "BOMT2"]  <- "Dasatinib Drugged 2"
+samp.ident.desc[samp.ident.desc %in% "BOMC1"]  <- "Dasatinib Control 1"
+samp.ident.desc[samp.ident.desc %in% "BOMC2"]  <- "Dasatinib Control 2"
+samp.ident.desc[samp.ident.desc %in% "BPFT1"]  <- "Entinostat Drugged 1"
+samp.ident.desc[samp.ident.desc %in% "BPMT1"]  <- "Entinostat Drugged 2"
+samp.ident.desc[samp.ident.desc %in% "BPFC1"]  <- "Entinostat Control 1"
+samp.ident.desc[samp.ident.desc %in% "BPMC1"]  <- "Entinostat Control 2"
+samp.ident.desc[samp.ident.desc %in% "BNFT1"]  <- "Miransertib Drugged 1"
+samp.ident.desc[samp.ident.desc %in% "BTMT2"]  <- "Miransertib Drugged 2"
+samp.ident.desc[samp.ident.desc %in% "BNFC1"]  <- "Miransertib Control 1"
+samp.ident.desc[samp.ident.desc %in% "BNMC1"]  <- "Miransertib Control 2"
+mouse.dat@meta.data[["samp.ident.desc"]] <- samp.ident.desc %>% as.factor()
+# Tidy up the environment
+rm(samp.ident.desc)
+```
+
+# Load and annotate data for dasatinib samples
+* Pre-process the cellranger output for dasatinib samples (as done by Conor)
+```{r}
+# Load the CellRanger output. EVENTUALLY CHANGE THIS TO THE FULLY PROCESSED VERSION AND WHEREVER THAT LIVES, this is just the one Conor has made.
+das.dat.10X <- Read10X(data.dir = "~/R/sc-seq_mouse/bash/dasruns/aggAll/outs/count/filtered_feature_bc_matrix")
+# Initialize the Seurat object with the raw (non-normalized data)
+das.dat <- CreateSeuratObject(counts = das.dat.10X, project = "druggedMice", names.delim = "-", names.field = 2)
+# Inspect the data
+das.dat
+```
+
+* Annotate with useful metadata
+```{r}
+# Add sample identifiers to the data
+das.dat <- RenameIdents(das.dat,
+                          "1" = "BOMC1",
+                          "2" = "BOMC2",
+                          "3" = "BOMT1",
+                          "4" = "BOMT2")
+das.dat@meta.data[["samp.ident"]] <- das.dat@active.ident
+
+# Add treatment identifiers to the data
+treat.ident <- das.dat@meta.data[["samp.ident"]] %>% as.character(.)
+treat.ident[treat.ident %in% c("BOMT1", "BOMT2")]  <- "Das - drug"
+treat.ident[treat.ident %in% c("BOMC1", "BOMC2")]  <- "Das - control"
+das.dat@meta.data[["treat.ident"]] <- treat.ident %>% as.factor(.)
+# Tidy up the environment
+rm(treat.ident)
+
+# Add treatment identifiers to the data for plotting
+treat.ident.plain <- das.dat@meta.data[["treat.ident"]] %>% as.character(.)
+treat.ident.plain[treat.ident.plain %in% "Das - drug"] <- "Dasatinib"
+treat.ident.plain[treat.ident.plain %in% "Das - control"] <- "Control"
+das.dat@meta.data[["treat.ident.plain"]] <- treat.ident.plain %>% as.factor(.)
+# Tidy up the environment
+rm(treat.ident.plain)
+
+# Add descriptive names to each sample for plotting
+samp.ident.desc <- das.dat@meta.data[["samp.ident"]] %>% as.character(.)
+samp.ident.desc[samp.ident.desc %in% "BOMT1"]  <- "Dasatinib Drugged 1"
+samp.ident.desc[samp.ident.desc %in% "BOMT2"]  <- "Dasatinib Drugged 2"
+samp.ident.desc[samp.ident.desc %in% "BOMC1"]  <- "Dasatinib Control 1"
+samp.ident.desc[samp.ident.desc %in% "BOMC2"]  <- "Dasatinib Control 2"
+das.dat@meta.data[["samp.ident.desc"]] <- samp.ident.desc %>% as.factor(.)
+# Tidy up the environment
+rm(samp.ident.desc)
+
+# Add more straightforward sample identifiers to the data for plotting when you're only dealing with the dasatinib dataset
+samp.ident.plain <- das.dat@meta.data[["samp.ident"]] %>% as.character(.)
+samp.ident.plain[samp.ident.plain %in% "BOMT1"]  <- "Dasatinib 1"
+samp.ident.plain[samp.ident.plain %in% "BOMT2"]  <- "Dasatinib 2"
+samp.ident.plain[samp.ident.plain %in% "BOMC1"]  <- "Control 1"
+samp.ident.plain[samp.ident.plain %in% "BOMC2"]  <- "Control 2"
+das.dat@meta.data[["samp.ident.plain"]] <- samp.ident.plain %>% as.factor()
+# Tidy up the environment
+rm(samp.ident.plain)
+```
+
+# Save .RDS files for further analysis
+```{r}
+# All data
+saveRDS(mouse.dat, "~/R/sc-seq_mouse/data/scDrugMiceAll_annotated.RDS")
+# Dasatinib data
+saveRDS(das.dat, "~/R/sc-seq_mouse/data/scDrugMiceDas_annotated.RDS")
+```
+
+# Compare mouse.dat dasatinib samples to das.dat, to ensure that they were processed in the same way 
+```{r}
+# Subset mouse.dat to include only dasatinib samples
+das.mouse.dat <- subset(mouse.dat, subset = treat.ident %in% c("Das - control", "Das - drug"))
+
+# Confirm that the cell numbers are identical for the four dasatinib samples in all workflows
+table(mouse.dat@meta.data[["samp.ident"]])
+table(das.mouse.dat@meta.data[["samp.ident"]])
+table(das.dat@meta.data[["samp.ident"]])
+
+# Confirm that all values of the counts matrix are identical - setdiff should output 0 differences
+setdiff(das.mouse.dat@assays[["RNA"]]@counts, das.dat@assays[["RNA"]]@counts)
+
+# Do the values in counts@i align between the two matrices?
+das.mouse.dat@assays[["RNA"]]@counts@i %in% das.dat@assays[["RNA"]]@counts@i %>% table()
+
+# Do the values in counts@p align between the two matrices?
+das.mouse.dat@assays[["RNA"]]@counts@p %in% das.dat@assays[["RNA"]]@counts@p %>% table()
+```

@@ -1,0 +1,1624 @@
+---
+title: "2_sc-seq_dasatinib"
+author: "Kieran Redpath"
+date: "2023-10-26"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Load packages
+```{r, warning=FALSE, message =FALSE}
+# General
+library(dplyr)
+# For single cell analysis
+library(Seurat)
+library(ggplot2)
+library(patchwork)
+library(celldex)
+library(SingleR)
+library(scater)
+# For clustering analysis
+library(clustree)
+# For sc-type cell type annotation
+library(HGNChelper)
+library(openxlsx)
+# sc-type functions from GitHub
+source("https://raw.githubusercontent.com/IanevskiAleksandr/sc-type/master/R/gene_sets_prepare.R");
+source("https://raw.githubusercontent.com/IanevskiAleksandr/sc-type/master/R/sctype_score_.R")
+source("https://raw.githubusercontent.com/IanevskiAleksandr/sc-type/master/R/auto_detect_tissue_type.R")
+# For plotting sc-type scores
+library("ggraph")
+library("igraph")
+library("tidyverse")
+library("data.tree")
+# For differential expression analysis
+library(limma)
+# IF YOU HAVE PROBLEMS WITH ANYTHING AND/OR WANT TO UPDATE SEURAT, BE AWARE OF THIS!!!
+# https://satijalab.org/seurat/articles/announcements#changes-in-seurat-v5
+# For identifying doublets in data
+library(DoubletFinder)
+# For fgsea
+library(fgsea)
+library(data.table)
+library(org.Mm.eg.db)
+# Load mm genome for annotation
+mm <- org.Mm.eg.db
+```
+
+# Load data
+```{r}
+das.dat <- readRDS("~/R/sc-seq_mouse/data/scDrugMiceDas_annotated.RDS")
+```
+
+# Quality control
+```{r, warning=FALSE}
+# Examine proportion of mitochondrial features, as well as n features and counts per sample.
+das.dat[["percent.mt"]] <- PercentageFeatureSet(das.dat, pattern = "^mt-")
+VlnPlot(das.dat, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), ncol = 3)
+# there are varying proportions of mt genes across samples
+
+# FeatureScatter is typically used to visualize feature-feature relationships, but can be used
+# for anything calculated by the object, i.e. columns in object metadata, PC scores etc.
+plot.counts.vs.features <- FeatureScatter(das.dat, feature1 = "nCount_RNA", feature2 = "nFeature_RNA")
+plot.counts.vs.features
+
+# This is adapted from the seurat tutorial with the goal of filtering out doublets and other low quality cells
+high.percent.mt <- ifelse(das.dat@meta.data[["percent.mt"]] < 10, TRUE, FALSE)
+table(high.percent.mt)
+# This would exclude xxx cells based on mtDNA percentage
+# Cutoff being used
+low.high.features <- ifelse(das.dat@meta.data[["nFeature_RNA"]] > 200, TRUE, FALSE)
+table(low.high.features)
+# This would exclude xxx cells based on nFeatures
+# Cutoff being used
+low.high.counts <- ifelse(das.dat@meta.data[["nCount_RNA"]] < 50000, TRUE, FALSE)
+table(low.high.counts)
+# This would exclude xxx cells based on nCounts
+
+# On the following plot, many of the cells with very high proportions of mtDNA have very few features, indicating that they aren't good quality
+plot.features.vs.percent.mt <- FeatureScatter(das.dat, feature1 = "nFeature_RNA", feature2 = "percent.mt")
+plot.features.vs.percent.mt
+
+# Try and plot some of these thresholds on the data to see what you're removing:
+# Add high percent mt information to metadata
+das.dat@meta.data[["high.percent.mt"]] <- high.percent.mt
+# Plot percent mt against total counts
+ggplot(das.dat@meta.data,  
+       aes(x = nCount_RNA, y = percent.mt, color = high.percent.mt)) +
+  geom_point() +
+  labs(y = "Percentage mitochondrial transcripts", x = "Counts", title = "Mitochondrial transcripts")
+
+# Mitochondrial Counts
+# Create a new column to classify points above/below the abline
+das.dat@meta.data$above_abline_mt <- ifelse(das.dat@meta.data$percent.mt > 10, "Above", "Below")
+percent.mt.plot <- ggplot(das.dat@meta.data,  
+                          aes(x = samp.ident.desc, y = percent.mt, color = samp.ident.desc)) +
+  geom_jitter(aes(shape = above_abline_mt)) +  # Change shape based on condition
+  geom_violin() +
+  geom_abline(intercept = 10, slope = 0, color = "black", lty = 2) +
+  labs(y = "Mitochondrial Counts (%)", x = NULL, title = NULL) +
+  scale_shape_manual(values = c("Above" = 4, "Below" = 16)) +  # Crosses for above, circles for below
+  theme_minimal() + 
+  theme(
+    text = element_text(family = "Times New Roman"),  # Set Times New Roman font for all text
+    legend.position = "none",  # Remove legend
+    axis.text.x = element_blank(),  # Remove x-axis labels
+    axis.ticks.x = element_blank()  # Remove x-axis ticks
+  )
+
+# Total Counts
+# Create a new column to classify points above/below the abline
+das.dat@meta.data$above_abline_counts <- ifelse(das.dat@meta.data$nCount_RNA > 50000, "Above", "Below")
+total.counts.plot <- ggplot(das.dat@meta.data,  
+                            aes(x = samp.ident.desc, y = nCount_RNA, color = samp.ident.desc)) +
+  geom_jitter(aes(shape = above_abline_counts)) +  # Change shape based on condition
+  geom_violin() +
+  geom_abline(intercept = 50000, slope = 0, color = "black", lty = 2) +
+  labs(y = "Counts", x = NULL, title = NULL) +
+  scale_shape_manual(values = c("Above" = 4, "Below" = 16)) +  # Crosses for above, circles for below
+  theme_minimal() + 
+  theme(
+    text = element_text(family = "Times New Roman"),  # Set Times New Roman font for all text
+    legend.position = "none",  # Remove legend
+    axis.text.x = element_blank(),  # Remove x-axis labels
+    axis.ticks.x = element_blank()  # Remove x-axis ticks
+  )
+
+# Unique Features
+# Create a new column to classify points above/below the abline
+das.dat@meta.data$below_abline_features <- ifelse(das.dat@meta.data$nFeature_RNA < 200, "Below", "Above")
+unique.features.plot <- ggplot(das.dat@meta.data,  
+                               aes(x = samp.ident.desc, y = nFeature_RNA, color = samp.ident.desc)) +
+  geom_jitter(aes(shape = below_abline_features)) +  # Change shape based on condition
+  geom_violin() +
+  geom_abline(intercept = 200, slope = 0, color = "black", lty = 2) +
+  labs(y = "Features", x = "Samples", title = NULL) +
+  scale_shape_manual(values = c("Below" = 4, "Above" = 16)) +  # Crosses for below, circles for above
+  theme_minimal() + 
+  theme(
+    text = element_text(family = "Times New Roman"),  # Set Times New Roman font for all text
+    legend.position = "none",  # Remove legend
+  )
+
+# Plot counts against percent mt, looking for a good cutoff
+plot.counts.vs.percent.mt <- FeatureScatter(das.dat, feature1 = "nCount_RNA", feature2 = "percent.mt")#, group.by = "high.percent.mt")
+plot.counts.vs.percent.mt
+
+# Create a combined plot for your methods chapter.
+# Define labels with bold Times New Roman font
+label_theme <- theme(
+  plot.tag = element_text(family = "Times New Roman", face = "bold", size = 12)
+)
+
+# Assign labels to each plot
+percent.mt.plot <- percent.mt.plot + label_theme + labs(tag = "A")
+total.counts.plot <- total.counts.plot + label_theme + labs(tag = "B")
+unique.features.plot <- unique.features.plot + label_theme + labs(tag = "C")
+
+# Combine plots in one column and add a shared title
+QC.plot <- (percent.mt.plot / total.counts.plot / unique.features.plot) +
+  plot_layout(ncol = 1) +
+  plot_annotation(
+    title = "Quality Control Thresholds",
+    theme = theme(
+      plot.title = element_text(family = "Times New Roman", face = "bold", size = 12, hjust = 0.5)
+    )
+  )
+
+# Save the image
+ggsave(
+  filename = "2_output/QC_plot.png",
+  plot = QC.plot,
+  width = 204.92, height = 250, units = "mm", dpi = 600
+)
+```
+
+# Get a few numbers out for the thesis
+```{r}
+
+```
+
+# Actually filter the data
+```{r, warning=FALSE}
+das.dat <- subset(das.dat, subset = nFeature_RNA > 200 & nCount_RNA < 50000 & percent.mt < 10)
+```
+
+# Normalisation
+```{r}
+# Using default settings
+das.dat <- NormalizeData(das.dat, normalization.method = "LogNormalize", scale.factor = 10000)
+```
+
+# Feature selection
+```{r}
+# Using default settings to find the most variable features to inform our clustering
+das.dat <- FindVariableFeatures(das.dat, selection.method = "vst", nfeatures = 2000)
+
+# Identify the 10 most highly variable genes
+top10 <- head(VariableFeatures(das.dat), 10)
+
+# # Plot all genes by variance, labeling the top 10
+variable.genes <- VariableFeaturePlot(das.dat)
+plot.variable.genes.lab <- LabelPoints(plot = variable.genes, points = top10, repel = TRUE)
+plot.variable.genes.lab
+```
+
+# Dimensional reduction
+```{r}
+# Apply linear transformation prior to PCA and other downstream analyses
+all.genes <- rownames(das.dat)
+das.dat <- ScaleData(das.dat, features = all.genes)
+
+# Perform linear dimensional reduction
+das.dat <- RunPCA(das.dat, features = VariableFeatures(object = das.dat))
+
+# Perform dimensional reduction with TSNE
+# das.dat <- RunTSNE(das.dat, features = VariableFeatures(object = das.dat))
+
+# Examine and visualize PCA results a few different ways
+# Provide lists of positively and negatively regulated genes per PC
+print(das.dat[["pca"]], dims = 1:5, nfeatures = 5)
+# Shows clearly up and down regulated genes in PCs
+VizDimLoadings(das.dat, dims = 1:2, reduction = "pca")
+# Plots first two PCs and shows all genes in each sample
+DimPlot(das.dat, reduction = "pca", shuffle = T)
+# Can be used to inform which PCs to use for downstream analysis (but to do so you should plot all PCs)
+DimHeatmap(das.dat, dims = 1, cells = 500, balanced = TRUE)
+```
+
+# Determine dimensionality of the data
+```{r}
+# This can help inform the number of PCs to use by plotting the distribution of p-values for each PC with a uniform distribution
+# This bit can take awhile
+das.dat <- JackStraw(das.dat, num.replicate = 100)
+das.dat <- ScoreJackStraw(das.dat, dims = 1:20)
+
+# The JackStrawPlot() function provides a visualization tool for comparing the distribution of p-values for each PC with a uniform distribution (dashed line). ‘Significant’ PCs will show a strong enrichment of features with low p-values (solid curve above the dashed line).
+JackStrawPlot(das.dat, dims = 1:20)
+# Alternatively, PCs can be ranked in a less computationally-intensive way using the ElbowPlot function
+ElbowPlot(das.dat, ndims = 50)
+# Looking at the ElbowPlot, since the JackStrawPlot is confusing, looks like about 12 PCs is pretty good
+# More notes on these methods can be found in the Seurat guide
+```
+
+# Cluster the cells and visualise dimensions with UMAP
+```{r}
+# Construct a K nearest neighbours graph based on the distance between points in PCA space and refine edge weights between cells with Jaccard similarity. Using the first 11 PCs here.
+das.dat <- FindNeighbors(das.dat, dims = 1:20)
+
+# Cluster the cells using Louvain algorithm. Setting resolution between 0.4 and 1.2 for a 3K cells dataset is recommended in the documentation, but optimal resolution often increases for larger datasets. Started with a resolution of 0.6
+das.dat <- FindClusters(das.dat, resolution = seq(0.1,1,length=10))
+
+# Explore the effect of clustering resolution with clustree
+clustree(das.dat)
+
+png(filename = "2_output/clustree.png", width = 2000, height = 1000, units = "px", res = 150)
+clustree(das.dat, show_axis = T) + NoLegend() + ylab("Seurat clustering resolution")
+dev.off()
+```
+
+# Based on the output of clustree, identify an appropriate resolution to cluster at and run a UMAP
+```{r}
+# Define which resolution we want to use to define our "seurat_clusters" and idents, which are used in the following code
+das.dat@meta.data[["seurat_clusters"]] <- das.dat@meta.data[["RNA_snn_res.0.6"]]
+Idents(das.dat) <- das.dat@meta.data[["RNA_snn_res.0.6"]]
+
+# Look at cluster IDs of the first 5 cells
+head(Idents(das.dat), 5)
+
+# Run and plot UMAP for dimensional reduction, first for all cells, second by treatment and third by sample names to show that the cells are clustered more by type than sample, and finally split by sample names to show the distribution of different clusters across each sample
+das.dat <- RunUMAP(das.dat, dims = 1:20)
+DimPlot(das.dat, reduction = "umap", label = T)
+DimPlot(das.dat, reduction = "umap", split.by = "treat.ident", label = T)
+DimPlot(das.dat, reduction = "umap", group.by = "samp.ident.plain")
+DimPlot(das.dat, reduction = "umap", group.by = "treat.ident", label =T)
+DimPlot(das.dat, reduction = "umap", split.by = "samp.ident.plain", label = T)
+```
+
+# Identify doublets now that the data is fully processed
+-   There is an argument for doing this after you've annotated your clusters, because then you can remove ones with low UMIs or uninformative marker genes and it will work better.
+-   DoubletFinder estimates artificial doublets and uses these to find real doublets.
+-   The artificial doublets should represent potential real doublets, so the code should only be run on a group of samples that came from the same 10X run.
+-   <https://github.com/chris-mcginnis-ucsf/DoubletFinder>
+-   <https://github.com/EDePasquale/DoubletDecon>
+-   DoubletDecon appears to work much earlier in the process, on Seurat files.
+-   <https://github.com/plger/scDblFinder>
+-   scDblFinder works on SingleCellExperiment objects. Notes this for doublet proportion:
+-   The expected proportion of doublets has little impact on the score, but a very strong impact on where the threshold will be placed (the thresholding procedure simultaneously minimizes classification error and departure from the expected doublet rate). It is specified through the dbr parameter and the dbr.sd parameter (the latter specifies the standard deviation of dbr, i.e. the uncertainty in the expected doublet rate). For 10x data, the more cells you capture the higher the chance of creating a doublet, and Chromium documentation indicates a doublet rate of roughly 1% per 1000 cells captures (so with 5000 cells, (0.01*5)*5000 = 250 doublets), and the default expected doublet rate will be set to this value (with a default standard deviation of 0.015). Note however that different protocols may create considerably more doublets, and that this should be updated accordingly. If you are unsure about the doublet rate, set dbr.sd=1 and the thresholding will be entirely based on the misclassification rates.
+```{r}
+# Find an optimal pK value using other DoubletFinder functions
+sweep.res.das.dat <- paramSweep_v3(das.dat, PCs = 1:20, sct = FALSE)
+sweep.stats.das.dat <- summarizeSweep(sweep.res.das.dat, GT = FALSE)
+pK.das.dat <- find.pK(sweep.stats.das.dat)
+# Define optimal pK value
+opt.pK <- pK.das.dat$pK[which.max(pK.das.dat$BCmetric)]
+opt.pK <- as.numeric(levels(opt.pK))[opt.pK]
+
+# Estimate proportion of homotypic doublets
+homotypic.prop <- modelHomotypic(das.dat@meta.data$seurat_clusters)
+nExp_poi <- round(0.075*nrow(das.dat@meta.data))  ## Assuming 7.5% doublet formation rate - tailor for your dataset
+# To add varying confidence to classifications
+nExp_poi.adj <- round(nExp_poi*(1-homotypic.prop))
+
+# Define pN - doesn't affect the analysis very much
+opt.pN <- 0.25
+
+# Define name of doublet classification metadata object for plotting
+# Regular
+doubletFinder.groups <- paste0("DF.classifications_", opt.pN, "_", opt.pK, "_", nExp_poi)
+# Adjusted
+doubletFinder.groups.adj <- paste0("DF.classifications_", opt.pN, "_", opt.pK, "_", nExp_poi.adj)
+
+# Run DoubletFinder
+das.dat <- doubletFinder_v3(seu = das.dat, PCs = 1:20, pN = opt.pN, pK = opt.pK, nExp = nExp_poi, reuse.pANN = F, sct = F)
+
+# Plot potential doublets and singlets
+DimPlot(das.dat, reduction = "umap", group.by = doubletFinder.groups)
+
+# Add a second level of confidence to classifications
+das.dat <- doubletFinder_v3(seu = das.dat, PCs = 1:20, pN = 0.25, pK = opt.pK, nExp = nExp_poi.adj, reuse.pANN = paste0("pANN_", opt.pN, "_", opt.pK, "_", nExp_poi))
+
+# Plot potential doublets and singlets
+DimPlot(das.dat, reduction = "umap", group.by = doubletFinder.groups.adj)
+
+# Plot counts across samples to see if certain samples have more doublets, or if doublets have high counts
+ggplot(das.dat@meta.data,  
+       aes(x = samp.ident.desc, y =nCount_RNA, color = doubletFinder.groups.adj)) +
+  geom_jitter() +
+  # geom_violin() +
+  theme(legend.position = "none", axis.text.x = element_text(angle = 45, hjust = 1)) +
+  labs(y = "Counts", x = "Samples", title = "Counts")
+
+#
+plot.counts.vs.percent.mt <- FeatureScatter(das.dat, feature1 = "nCount_RNA", feature2 = "percent.mt", group.by = doubletFinder.groups.adj)
+plot.counts.vs.percent.mt
+
+table(das.dat@meta.data[[doubletFinder.groups.adj]])
+table(das.dat@meta.data[[doubletFinder.groups.adj]]) %>% prop.table()
+# With unfiltered cells 237 doublets (7.48%) and 2928 singlets (92.5%)
+# With filtered cells and the second round of doublet classification, 210 doublets (7%) and 2771 singlets (93%)
+# The only thing that really remains to be done here is see if there's some way to figure out if your expected proportion of doublets is 7.5% or not, because that's the major assumption of this algorithm currently.
+```
+
+# Filter out doublets
+```{r}
+das.dat <- subset(das.dat, subset = DF.classifications_0.25_0.005_205 == "Singlet")
+```
+
+# Attempt to assign some cell types automatically using sc-type and its database
+# Create database of reference data and gene sets for sc-type
+```{r}
+# Load database
+database <- "https://raw.githubusercontent.com/IanevskiAleksandr/sc-type/master/ScTypeDB_full.xlsx";
+# Define tissue type
+tissue <- "Stomach"
+# Guess tissue type
+# tissue_guess = auto_detect_tissue_type(path_to_db_file = database, seuratObject = das.dat, scaled = FALSE, assay = "RNA")
+# if scaled = TRUE, make sure the data is scaled, as seuratObject[[assay]]@scale.data is used. If you just created a Seurat object, without any scaling and normalization, set scaled = FALSE, seuratObject[[assay]]@counts will be used         
+# Prepare gene sets
+gs_list <- gene_sets_prepare(database, tissue)
+```
+
+# Find Marker Genes for each cluster with Seurat and sctype
+```{r}
+# Find markers with Seurat
+das.markers <- FindAllMarkers(das.dat, only.pos = TRUE, min.pct = 0.25, logfc.threshold = 0.25) %>% .[order(.$avg_log2FC, decreasing = TRUE ),]
+# das.markers <- FindAllMarkers(das.dat, only.pos = TRUE) #, min.pct = 0.25) #, logfc.threshold = 0.25)
+
+# Assign cell types to each cluster using sctype
+es.max = sctype_score(scRNAseqData = das.dat[["RNA"]]@scale.data, scaled = TRUE, 
+                      gs = gs_list$gs_positive, gs2 = gs_list$gs_negative) 
+
+# Merge by cluster
+cl_results = do.call("rbind", lapply(unique(das.dat@meta.data$seurat_clusters), function(cl){
+  es.max.cl = sort(rowSums(es.max[ ,rownames(das.dat@meta.data[das.dat@meta.data$seurat_clusters==cl, ])]), decreasing = !0)
+  head(data.frame(cluster = cl, type = names(es.max.cl), scores = es.max.cl, ncells = sum(das.dat@meta.data$seurat_clusters==cl)), 10)
+}))
+sctype_scores = cl_results %>% group_by(cluster) %>% top_n(n = 1, wt = scores)  
+
+# set low-confident (low ScType score) clusters to "unknown"
+sctype_scores$type[as.numeric(as.character(sctype_scores$scores)) < sctype_scores$ncells/4] = "Unknown"
+print(sctype_scores[,1:3])
+#sctype_score uses positive (gs) and negative (gs2) markers. If you don't want to use negative markers, set gs2 to NULL
+
+# Assign types and plot UMAP
+das.dat@meta.data$type.sctype = ""
+for(j in unique(sctype_scores$cluster)){
+  cl_type = sctype_scores[sctype_scores$cluster==j,]; 
+  das.dat@meta.data$type.sctype[das.dat@meta.data$seurat_clusters == j] = as.character(cl_type$type[1])
+}
+
+# Bubble plot
+# prepare edges
+cl_results=cl_results[order(cl_results$cluster),]; edges = cl_results; edges$type = paste0(edges$type,"_",edges$cluster); edges$cluster = paste0("cluster ", edges$cluster); edges = edges[,c("cluster", "type")]; colnames(edges) = c("from", "to"); rownames(edges) <- NULL
+
+# prepare nodes
+nodes_lvl1 = sctype_scores[,c("cluster", "ncells")]; nodes_lvl1$cluster = paste0("cluster ", nodes_lvl1$cluster); nodes_lvl1$Colour = "#f1f1ef"; nodes_lvl1$ord = 1; nodes_lvl1$realname = nodes_lvl1$cluster; nodes_lvl1 = as.data.frame(nodes_lvl1);
+nodes_lvl2 = c(); 
+ccolss= c("#5f75ae","#92bbb8","#64a841","#e5486e","#de8e06","#eccf5a","#b5aa0f","#e4b680","#7ba39d","#b15928","#ffff99", "#6a3d9a","#cab2d6","#ff7f00","#fdbf6f","#e31a1c","#fb9a99","#33a02c","#b2df8a","#1f78b4","#a6cee3", "#03dbfc")
+for (i in 1:length(unique(cl_results$cluster))){
+  dt_tmp = cl_results[cl_results$cluster == unique(cl_results$cluster)[i], ]; nodes_lvl2 = rbind(nodes_lvl2, data.frame(cluster = paste0(dt_tmp$type,"_",dt_tmp$cluster), ncells = dt_tmp$scores, Colour = ccolss[i], ord = 2, realname = dt_tmp$type))
+}
+
+nodes = rbind(nodes_lvl1, nodes_lvl2); nodes$ncells[nodes$ncells<1] = 1;
+files_db = openxlsx::read.xlsx(database)[,c("cellName","shortName")]; files_db = unique(files_db); nodes = merge(nodes, files_db, all.x = T, all.y = F, by.x = "realname", by.y = "cellName", sort = F)
+nodes$shortName[is.na(nodes$shortName)] = nodes$realname[is.na(nodes$shortName)]; nodes = nodes[,c("cluster", "ncells", "Colour", "ord", "shortName", "realname")]
+
+# Remove inexplicably duplicated rows, where shortname is mesothelial, not mesothelial_cells
+nodes <- nodes[nodes$shortName != "Mesothelial", ]
+
+mygraph <- graph_from_data_frame(edges, vertices=nodes)
+# Doesn't work due to duplicate vertex names (first column of nodes). This is because for some reason each of the mesothelial cell clusters is duplicated, with one including the short name "mesothelial", and the other "mesothelial_cells"
+
+# Make the graph
+plot.sctype.per.cluster <- ggraph(mygraph, layout = 'circlepack', weight=I(ncells)) + 
+  geom_node_circle(aes(filter=ord==1,fill=I("#F5F5F5"), colour=I("#D3D3D3")), alpha=0.9) + geom_node_circle(aes(filter=ord==2,fill=I(Colour), colour=I("#D3D3D3")), alpha=0.9) +
+  theme_void() + geom_node_text(aes(filter=ord==2, label=realname, colour=I("#ffffff"), fill="white", repel = !1, parse = T, size = I(log(ncells,25)*1.2)))+ geom_node_label(aes(filter=ord==1,  label=realname, colour=I("#000000"), size = I(3), fill="white", parse = T), repel = !0, segment.linetype="dotted")
+
+# Use gridExtra to print these graphs next to each other, with the UMAP annotated with original cluster ID's, not annotated cell types
+png(filename = "2_output/type.sctype_and_types_per_cluster.png", width = 2000, height = 1000, units = "px")
+gridExtra::grid.arrange(DimPlot(das.dat, reduction = "umap", label = TRUE, repel = TRUE, cols = ccolss, group.by = "type.sctype"), plot.sctype.per.cluster, ncol = 2)
+dev.off()
+
+# UMAP with sctype types and treatment identification
+png(filename = "2_output/type.sctype_by_treat.ident.png", width = 1500, height = 1000, units = "px")
+DimPlot(das.dat, reduction = "umap", split.by = "treat.ident", group.by = "type.sctype", label = T)
+dev.off()
+DimPlot(das.dat, reduction = "umap", split.by = "treat.ident", group.by = "type.sctype", label = T)
+
+# UMAP with seurat cluster idents
+png(filename = "2_output/seurat_cluster.png", width = 1500, height = 1000, units = "px")
+DimPlot(das.dat, reduction = "umap", label = TRUE, repel = TRUE)
+dev.off()
+DimPlot(das.dat, reduction = "umap", label = TRUE, repel = TRUE)
+
+# UMAP with seurat cluster idents and treatment identification
+png(filename = "2_output/seurat_cluster_by_treat.ident.png", width = 1500, height = 1000, units = "px")
+DimPlot(das.dat, reduction = "umap", label = TRUE, repel = TRUE, split.by = "treat.ident")
+dev.off()
+
+# sctype annotations per cluster
+plot.sctype.per.cluster
+
+# Dumb investigative plots
+FeaturePlot(das.dat, features = c("Epcam"))
+FeaturePlot(das.dat, features = c("Cdh1"))
+FeaturePlot(das.dat, features = c("Krt7"))
+FeaturePlot(das.dat, features = c("Cldn4"))
+VlnPlot(das.dat, features = c("Cdh1", "Epcam"))
+
+FeatureScatter(das.dat, "Cdh1", "Epcam", cells = which(das.dat@meta.data[["seurat_clusters"]] == 4))
+```
+
+# Miscellaneous plotting of various genes, can probably mostly be removed
+```{r}
+# Do these all on Vlnplots, which mean you don't need to shape.by cluster and look way better
+# Muc13 and Dmbt1, named markers for cluster 8
+VlnPlot(das.dat, features = c("Muc13", "Dmbt1"),  group.by = "seurat_clusters")
+# Dmbt1 isn't as strong of a marker for cluster 8, which is why it isn't on the list, but is expressed here
+# Alpi and Akp3 (human/mouse orthologs), top 2 markers for cluster 8
+VlnPlot(das.dat, features = c("Alpi", "Akp3"),  group.by = "seurat_clusters")
+# Ada and Adh6a, top third and fourth markers for cluster 8
+VlnPlot(das.dat, features = c("Ada", "Adh6a"),  group.by = "seurat_clusters")
+
+# Let's also look at Cdh1 and Trp53 - If we're looking at cancer cells (but only the responding ones) in cluster 8, we'd hope these genes weren't expressed strongly there
+# Cdh1
+VlnPlot(das.dat, features = "Cdh1",  group.by = "seurat_clusters")
+#Trp53
+VlnPlot(das.dat, features = "Trp53",  group.by = "seurat_clusters")
+# Epcam (epithelial cell marker)
+VlnPlot(das.dat, features = "Epcam",  group.by = "seurat_clusters")
+# Cd44 (since Cdh1/Trp53 KO cells should be expressing Cd44
+VlnPlot(das.dat, features = "Cd44",  group.by = "seurat_clusters")
+# Krt14, which is underexpressed with Cdh1 loss according to a paper from the lab
+VlnPlot(das.dat, features = "Krt14",  group.by = "seurat_clusters") 
+# Plot Olfm4, Cdh17, Krt20, Muc5ac, Lgals4, Akr1B10, and Reg4, all of which have been found decently expressed in human gastric cancer
+VlnPlot(das.dat, features = c("Olfm4", "Cdh17", "Krt20", "Muc5ac"), group.by = "seurat_clusters")
+
+VlnPlot(das.dat, features = c("Lgals4", "Akr1B10", "Reg4"), group.by = "type.sctype")
+
+# ---------------------------------------------------------------------------------------------------------------
+
+# Try to find other clusters that might represent cancer cells by plotting Cdh1 and Trp53 across all samples (Dmbt1 and Muc13 are just for fun, they probably aren't important in cancer as a whole), as this should be consistent
+# VlnPlot
+VlnPlot(das.dat, features = c("Cdh1", "Trp53", "Cd44", "Dmbt1", "Muc13"),  group.by = "seurat_clusters")
+# Also plot Gkn2, Tff1, Tff2,normal gastric mucosal epithelial markers https://www.cell.com/cell-reports/pdfExtended/S2211-1247(22)01332-8
+VlnPlot(das.dat, features = c("Cdh1", "Gkn2", "Tff1", "Tff2"), group.by = "seurat_clusters")
+# Plot some good enterocyte markers (the top 5 on Panglao, plus Apobec1 for fun) to see if they're more highly expressed in cluster 8
+VlnPlot(das.dat, features = c("Slc10a2", "Alpi", "Krt20", "Si", "Rnf186", "Klf5", "Apobec1"),  group.by = "seurat_clusters")
+# Plot Msmb, a gene identified as a marker for signet ring cells in a paper file:///C:/Users/axonn/OneDrive/University/PhD/Papers%20etc/Single-cell%20analysis%20of%20gastric%20signet%20ring%20cell%20carcinoma.pdf
+VlnPlot(das.dat, features = "Msmb", group.by = "type.sctype")
+FeaturePlot(das.dat, features = "Msmb")
+
+#FeaturePlot
+FeaturePlot(das.dat, features = c("Cdh1", "Trp53", "Cd44", "Dmbt1", "Muc13"))
+# Also plot Gkn2, Tff1, Tff2,normal gastric mucosal epithelial markers https://www.cell.com/cell-reports/pdfExtended/S2211-1247(22)01332-8
+FeaturePlot(das.dat, features = c("Cdh1", "Gkn2", "Tff1", "Tff2"))
+# Also plot  some markers of apoptosis to see if cluster 8 is apoptosing
+# CD95 (Fas), CD40, CD49d (Itga4) and CD11a, plus some others
+FeaturePlot(das.dat, features = c("Fas", "Cd40", "Itga4", "Itgal", "Fasl", "Bcl2", "Nfkb1"))
+# None of these cluster obviously to cluster 8 (or anywhere really)
+
+# Featureplot proliferation markers
+FeaturePlot(das.dat, features = c("Trp53", "Cdh1", "Mki67"))
+
+
+DimPlot(das.dat, reduction = "umap", label = TRUE, repel = TRUE)
+DimPlot(das.dat, reduction = "umap", label = TRUE, repel = TRUE, group.by = 'type.sctype')
+# Cells clustered as and "Myeloid cells" (cluster 1), "Lymphatic endothelial cells" (cluster 2), and "Mesothelial cells" (cluster 4) are also lacking in both Cdh1 and Trp53 (mainly Cdh1), So may also represent cancer (or just cells that don't normally express these genes, such as non-epithelial cells)
+```
+
+# Thesis UMAP - un-annotated for Chapter 3.3
+```{r}
+# Define new labels for the treatment groups
+new_labels <- c("Das - control" = "Control",
+                "Das - drug" = "Dasatinib") # Modify accordingly
+
+# Generate UMAP plot
+p <- DimPlot(das.dat, reduction = "umap", label = TRUE, repel = TRUE, split.by = "treat.ident", group.by = "seurat_clusters", pt.size = 0.2, label.size = 3) +
+  theme_minimal() +
+  theme(
+    panel.grid = element_blank(), # Remove gridlines
+    axis.line = element_line(), # Keep axis lines
+    axis.ticks = element_blank(), # Remove axis ticks
+    axis.text = element_blank(), # Remove axis tick labels
+    text = element_text(family = "Times New Roman", size = 12), # Set font for all text
+    plot.title = element_text(face = "bold", size = 12, family = "Times New Roman"), # Title styling
+    legend.key.size = unit(0.5, "lines"), # Make legend more compact
+    legend.position = "bottom",
+    legend.text = element_text(size = 12, family = "Times New Roman"), # Legend text size
+    legend.title = element_text(size = 12, family = "Times New Roman", face = "bold"), # Bold legend title
+    strip.text = element_text(family = "Times New Roman", size = 12, face = "bold") # Facet panel title styling
+  ) +
+  labs(title = "Seurat Clusters by Treatment") +
+  facet_wrap(~treat.ident, labeller = as_labeller(new_labels)) # Rename panel titles
+
+# Save the plot with A4 width minus margins
+ggsave(file = "2_output/Seurat_Clusters_by_Treatment.png", plot = p, width = 15.92, height = 10, units = "cm", dpi = 600)
+# Tidy up the environment
+rm("new_labels")
+```
+
+# Thesis Heatmap for Chapter 3.3.3
+```{r}
+# Identify top markers for each cluster
+das.markers %>%
+  group_by(cluster) %>%
+  dplyr::filter(avg_log2FC > 1) %>%
+  slice_head(n = 5) %>%
+  ungroup() -> top5
+
+# Create the heatmap
+p <- DoHeatmap(das.dat, group.by = "seurat_clusters", features = top5$gene, size = 2, group.bar = TRUE) + 
+  theme_void() +  # Remove grey background
+  theme(
+    axis.text.y = element_text(size = 7, family = "Times New Roman", face = "italic"), # Italicized gene labels (Y-axis)
+    axis.text.x = element_blank(), # Remove X-axis labels
+    axis.title = element_text(size = 12, family = "Times New Roman"), # Axis titles size 12
+    plot.title = element_text(face = "bold", size = 12, family = "Times New Roman"), # Bold title
+    text = element_text(family = "Times New Roman", size = 12), # Set default font to Times New Roman
+    plot.background = element_rect(fill = "white", color = NA), # Ensures white background
+    legend.position = "none" # Remove legend
+  ) +
+  plot_annotation(title = "Expression of Top Five Positive Marker Genes by Cluster", 
+                  theme = theme(plot.title = element_text(face = "bold", size = 12, family = "Times New Roman")))
+                  
+# Save the heatmap with A4 width minus margins in high resolution
+ggsave("2_output/Markers_Heatmap.png", plot = p, width = 15.92, height = 22, units = "cm", dpi = 600)
+```
+
+# Write a loop to pull out markers for individual clusters as separate objects
+```{r}
+# Create empty list
+das.markers.list <- list()
+# Fill list
+for(i in levels(das.markers$cluster)){
+  das.markers.list[[i]] <- das.markers %>% 
+    group_by(cluster) %>% 
+    filter(cluster == i)
+  # Rename data.frame columns within list
+  names(das.markers.list[[i]]) <- colnames(das.markers)
+}
+
+# If you want each of these to also be a separate table (Still needs work but there should be some way to do it):
+# for(i in 1:(length(das.markers.list)-1){
+#   assign(paste("das.markers.", names(das.markers.list[i])) <- das.markers.list[[i]])
+# }
+
+# Print the top 5 markers for each cluster
+for(i in 1:length(das.markers.list)){
+  das.markers.list[[i]] %>% head(., n = 5) %>% print(.)
+}
+
+# Put the top 5 markers from each cluster into a new data frame for easier viewing and annotation
+das.markers.top5.list <- lapply(das.markers.list, function(df) head(df, 5))
+# Use do.call to combine the list of data frames into a single data frame
+das.markers.top5.data.frame <- do.call(rbind, das.markers.top5.list)
+# If you want to reset row names in the combined data frame
+# rownames(combined_data) <- NULL
+
+# Now 'combined_data' contains the first 5 rows of each data frame
+
+# Write out das.markers to link to in supplementary tables
+write.csv(das.markers, file = "2_output/markers.csv", row.names = F)
+```
+
+# Pull out markers for individual clusters as separate objects - made redundant by loop above
+```{r}
+# Checking the annotation of other cell type clusters too, to see if they might be cancerous (especially when multiple clusters have been labelled with the same cell types)
+# What are the markers of cluster 0 ("Pit Cells")?
+das.markers.0 <- das.markers %>%
+  group_by(cluster) %>%
+  filter(cluster == 0)
+
+# What are the markers of cluster 1 ("Fibroblasts A")?
+das.markers.1 <- das.markers %>%
+  group_by(cluster) %>%
+  filter(cluster == 1)
+
+# What are the markers of cluster 2 ("Macrophages")?
+das.markers.2 <- das.markers %>%
+  group_by(cluster) %>%
+  filter(cluster == 2)
+
+# What are the markers of cluster 3 ("Mesothelial Cells A")?
+das.markers.3 <- das.markers %>%
+  group_by(cluster) %>%
+  filter(cluster == 3)
+
+# What are the markers of cluster 4 ("Proliferating Epithelial Cells A")?
+das.markers.4 <- das.markers %>%
+  group_by(cluster) %>%
+  filter(cluster == 4)
+
+# What are the markers of cluster 5 ("T Cells")?
+das.markers.5 <- das.markers %>%
+  group_by(cluster) %>%
+  filter(cluster == 5)
+
+# What are the markers of cluster 6 ("Chief Cells")?
+das.markers.6 <- das.markers %>%
+  group_by(cluster) %>%
+  filter(cluster == 6)
+
+# What are the markers of cluster 7 ("Mucous Cells")?
+das.markers.7 <- das.markers %>%
+  group_by(cluster) %>%
+  filter(cluster == 7)
+
+# What are the markers of cluster 8 ("Smooth Muscle Cells")?
+das.markers.8 <- das.markers %>%
+  group_by(cluster) %>%
+  filter(cluster == 8)
+
+# What are the markers of cluster 9 ("Parietal Cells")?
+das.markers.9 <- das.markers %>%
+  group_by(cluster) %>%
+  filter(cluster == 9)
+
+# What are the markers of cluster 10 ("Enterocytes")?
+das.markers.10 <- das.markers %>%
+  group_by(cluster) %>%
+  filter(cluster == 10)
+
+# What are the markers of cluster 11 ("Mesothelial Cells B")?
+das.markers.11 <- das.markers %>%
+  group_by(cluster) %>%
+  filter(cluster == 11)
+
+# What are the markers of cluster 12 ("B Cells")?
+das.markers.12 <- das.markers %>%
+  group_by(cluster) %>%
+  filter(cluster == 12)
+
+# What are the markers of cluster 13 ("Endothelial Cells")?
+das.markers.13 <- das.markers %>%
+  group_by(cluster) %>%
+  filter(cluster == 13)
+
+# What are the markers of cluster 14 ("Fibroblasts B")?
+das.markers.14 <- das.markers %>%
+  group_by(cluster) %>%
+  filter(cluster == 14)
+
+# What are the markers of cluster 15 ("Unknown")?
+das.markers.15 <- das.markers %>%
+  group_by(cluster) %>%
+  filter(cluster == 15)
+
+# What are the markers of cluster 16 ("Neutrophils")?
+das.markers.16 <- das.markers %>%
+  group_by(cluster) %>%
+  filter(cluster == 16)
+
+# What are the markers of cluster 17 ("Enteroendocrine Cells")?
+das.markers.17 <- das.markers %>%
+  group_by(cluster) %>%
+  filter(cluster == 17)
+
+# What are the markers of cluster 18 ("Proliferating Epithelial Cells B")?
+das.markers.18 <- das.markers %>%
+  group_by(cluster) %>%
+  filter(cluster == 18)
+```
+
+# After a very thorough literature search of the top 5 positive marker genes (by log2 FC) for each cluster, re-label each cluster with your best guesses for identity
+```{r}
+# Technical classifications
+# type.manual.v1 <- c("Foveolar Cells", "Fibroblasts A", "Macrophages", "Mesothelial Cells A", "Cancer Cells", "T Cells", "Gastric Chief Cells", "Deep Mucous Gland Cells", "Smooth Muscle Cells", "Parietal Cells", "Enterocytes", "Mesothelial Cells B", "B Cells", "Endothelial Cells", "Fibroblasts B", "Unknown", "Neutrophils", "Enteroendocrine Cells", "Little Baby Cluster")
+# names(type.manual.v1) <- levels(das.dat)
+# das.dat <- RenameIdents(das.dat, type.manual.v1)
+# das.dat@meta.data[["type.manual.v1"]] <- das.dat@active.ident
+
+# Streamlined classifications for presenting
+type.manual.v1 <- c("Pit Cells", "Fibroblasts", "Macrophages", "Mesothelial Cells", "Proliferating Epithelial Cells", "T Cells", "Chief Cells", "Mucous Cells", "Smooth Muscle Cells", "Parietal Cells", "Enterocytes", "Mesothelial Cells", "B Cells", "Endothelial Cells", "Fibroblasts", "Undetermined", "Neutrophils", "Enteroendocrine Cells", "Proliferating Epithelial Cells")
+
+# Have renamed "Gastric Chief Cells" to "Chief Cells", "Deep Mucous Gland Cells" to "Mucous Cells", and "Foveolar Cells" to "Pit Cells" for consistency with subclustering annotations later. 
+
+# Add to a data frame so you know which Seurat clusters they relate to
+seurat.cluster <- 0:18
+# Create the data frame
+type.to.cluster <- data.frame(
+  type.manual.v1 = type.manual.v1,
+  seurat.cluster = seurat.cluster
+)
+
+# Add as metadata to the object
+names(type.manual.v1) <- levels(das.dat)
+das.dat <- RenameIdents(das.dat, type.manual.v1)
+das.dat@meta.data[["type.manual.v1"]] <- das.dat@active.ident
+
+png("2_output/type.manual.v1_by_treat.ident.png", height = 2000, width = 2000, units = "px", pointsize = 20)
+DimPlot(das.dat, reduction = "umap", label = TRUE, repel = TRUE, label.size = 10, label.box = F, pt.size = 2, group.by = "type.manual.v1", split.by = "treat.ident") + xlim(NA, 10) + NoLegend() + theme(
+  axis.text.x = element_blank(), axis.ticks.x = element_blank(), 
+  axis.text.y = element_blank(), axis.ticks.y = element_blank(),
+  axis.title = element_blank(),
+  strip.text.x = element_text(size = 40, face = "bold"))
+dev.off()
+
+png("2_output/type.manual.v1.png", height = 2000, width = 2000, units = "px", pointsize = 20)
+DimPlot(das.dat, reduction = "umap", label = TRUE, repel = TRUE, label.size = 10, pt.size = 2, group.by = "type.manual.v1") + xlim(NA, 10) + NoLegend() + theme(
+  axis.text.x = element_blank(), axis.ticks.x = element_blank(), 
+  axis.text.y = element_blank(), axis.ticks.y = element_blank(),
+  axis.title = element_blank(),
+  strip.text.x = element_text(size = 40, face = "bold"))
+dev.off()
+
+png("2_output/VlnPlotCdh1.png", height = 1000, width = 2000, units = "px", res = 0.4, pointsize = 300)
+VlnPlot(das.dat, features = "Cdh1", pt.size = 1) + NoLegend() +theme(axis.text.x=element_text(size=30))
+dev.off()
+
+VlnPlot(das.dat, features = "Cdh1") + NoLegend()
+
+png("2_output/type.manual.v1_by_samp.ident.desc.png", height = 1000, width = 2000, units = "px", pointsize = 20)
+DimPlot(das.dat, reduction = "umap", label = TRUE, pt.size = 0.8, group.by = "type.manual.v1", split.by = "samp.ident.desc") + xlim(NA, 10) + NoLegend()
+dev.off()
+
+png("2_output/type.sctype_by_treat.ident.png", height = 2000, width = 2000, units = "px", pointsize = 20)
+DimPlot(das.dat, reduction = "umap", label = TRUE, repel = TRUE, pt.size = 2, group.by = "type.sctype", split.by = "treat.ident", label.size = 10) + xlim(NA, 10) + NoLegend() + theme(
+  axis.text.x = element_blank(), axis.ticks.x = element_blank(), 
+  axis.text.y = element_blank(), axis.ticks.y = element_blank(),
+  axis.title = element_blank(),
+  strip.text.x = element_text(size = 40, face = "bold"))
+dev.off()
+
+# UMAP with seurat cluster idents
+png(filename = "2_output/seurat_cluster.png", width = 2000, height = 1000, units = "px", pointsize = 20)
+DimPlot(das.dat, group.by = "seurat_clusters", reduction = "umap", label = F, pt.size = 2, repel = TRUE, label.size = 15) + xlim(NA, 10) + NoLegend() + theme(
+  axis.text.x = element_blank(), 
+  axis.ticks.x = element_blank(), 
+  axis.text.y = element_blank(), 
+  axis.ticks.y = element_blank(),
+  axis.title = element_blank())
+dev.off()
+DimPlot(das.dat, reduction = "umap", label = TRUE, repel = TRUE)
+```
+
+# How many cells in each cluster?
+```{r}
+table(das.dat@meta.data$type.manual.v1)
+```
+
+# Thesis UMAP - annotated for Chapter 3.3.3
+```{r}
+# Define new labels for the treatment groups
+new_labels <- c("Das - control" = "Control",
+                "Das - drug" = "Dasatinib") # Modify accordingly
+
+# Generate UMAP plot
+p <- DimPlot(das.dat, reduction = "umap", label = TRUE, repel = TRUE, group.by = "type.manual.v1", split.by = "treat.ident", pt.size = 0.1, label.size = 2.4) +
+  theme_minimal() +
+  theme(
+    panel.grid = element_blank(), # Remove gridlines
+    axis.line = element_line(), # Keep axis lines
+    axis.ticks = element_blank(), # Remove axis ticks
+    axis.text = element_blank(), # Remove axis tick labels
+    text = element_text(family = "Times New Roman", size = 12), # Set font for all text
+    plot.title = element_text(face = "bold", size = 12, family = "Times New Roman"), # Title styling
+    legend.position = "bottom", # Move legend below the plot
+    legend.key.size = unit(0.5, "lines"), # Make legend more compact
+    legend.text = element_text(size = 9, family = "Times New Roman"), # Legend text size
+    legend.title = element_text(size = 9, family = "Times New Roman", face = "bold"), # Bold legend title
+    strip.text = element_text(family = "Times New Roman", size = 12, face = "bold") # Facet panel title styling
+  ) +
+  labs(title = "Annotated Clusters by Treatment") +
+  facet_wrap(~treat.ident, labeller = as_labeller(new_labels)) # Rename panel titles
+
+# Save the plot with A4 width minus margins
+ggsave(file = "2_output/Annotated_Clusters_by_Treatment.png", plot = p, width = 15.92, height = 10, units = "cm", dpi = 600)
+
+# Tidy up the environment
+rm("new_labels")
+```
+
+
+# Export the Seurat object at this stage to use it in other workflows
+```{r}
+saveRDS(das.dat, file = "2_output/das_dat_processed.RDS")
+```
+
+```{r}
+# Cdh1 and what we think das is targeting (and also epithelial Ddr1 vs mesenchymal Ddr2)
+FeaturePlot(das.dat, features = c("Cdh1", "Src"), split.by = "treat.ident")
+FeaturePlot(das.dat, features = c("Ddr1", "Ddr2"), split.by = "treat.ident")
+# AKt3 esp. was significantly correlated with CDH1
+FeaturePlot(das.dat, features = c("Akt1", "Akt2", "Akt3"), split.by = "treat.ident")
+FeaturePlot(das.dat, features = c("Pik3r1", "Mapk1"), split.by = "treat.ident")
+
+# Genes correlated with AKT3 in TCGA and GEO that have been previously implicated in GC (also includes Ddr2)
+FeaturePlot(das.dat, features = c("Cdh11", "Msrb3","Fstl1"), split.by = "treat.ident")
+
+# EGFR and HER2
+FeaturePlot(das.dat, features = c("Egfr", "Erbb2"), split.by = "treat.ident")
+# MAPK/ERK signalling pathway
+FeaturePlot(das.dat, features = c("Creb1", "Atf1"), split.by = "treat.ident")
+# Mtorc1 and Mtorc2 (in some signalling pathway or another, also Tk's)
+FeaturePlot(das.dat, features = c("Mtor", "Rptor"), split.by = "treat.ident")
+# Regulated by Foxo, which is phosphorylated by PI3K/Akt signalling
+FeaturePlot(das.dat, features = c("Ar", "Erg", "Runx2"), split.by = "treat.ident")
+# Erk signalling
+FeaturePlot(das.dat, features = c("Ccnd1", "Puma"), split.by = "treat.ident")
+FeaturePlot(das.dat, features = c("Bcl2l11", "Bcl2"), split.by = "treat.ident")
+FeaturePlot(das.dat, features = c("Mcl1", "Bcl2l1"), split.by = "treat.ident")
+
+# Chat GPT suggested genes for Pi3k/Akt signalling
+FeaturePlot(das.dat, features = "Foxo1", split.by = "treat.ident")
+FeaturePlot(das.dat, features = "Mtor", split.by = "treat.ident")
+FeaturePlot(das.dat, features = "Ccnd1", split.by = "treat.ident")
+FeaturePlot(das.dat, features = "Bcl2", split.by = "treat.ident")
+FeaturePlot(das.dat, features = "Nfkb1", split.by = "treat.ident")
+FeaturePlot(das.dat, features = "Gsk3b", split.by = "treat.ident")
+FeaturePlot(das.dat, features = "Hif1a", split.by = "treat.ident")
+FeaturePlot(das.dat, features = "Slc2a4", split.by = "treat.ident")
+FeaturePlot(das.dat, features = "Myc", split.by = "treat.ident")
+FeaturePlot(das.dat, features = "Trp53", split.by = "treat.ident")
+FeaturePlot(das.dat, features = "Akt1", split.by = "treat.ident")
+FeaturePlot(das.dat, features = "Akt2", split.by = "treat.ident")
+FeaturePlot(das.dat, features = "Akt3", split.by = "treat.ident")
+
+# Chat GPT suggested names for Ddr2 signalling
+FeaturePlot(das.dat, features = "Mmp2", split.by = "treat.ident")
+FeaturePlot(das.dat, features = "Mmp3", split.by = "treat.ident")
+FeaturePlot(das.dat, features = "Col1a1", split.by = "treat.ident")
+FeaturePlot(das.dat, features = "Tgfb1", split.by = "treat.ident")
+FeaturePlot(das.dat, features = "Fos", split.by = "treat.ident")
+FeaturePlot(das.dat, features = "Jun", split.by = "treat.ident")
+FeaturePlot(das.dat, features = "Ccn2", split.by = "treat.ident")
+FeaturePlot(das.dat, features = "Pdgfa", split.by = "treat.ident")
+FeaturePlot(das.dat, features = "Il6", split.by = "treat.ident")
+FeaturePlot(das.dat, features = "Igf1", split.by = "treat.ident")
+
+DimPlot(das.dat, reduction = "umap", label = TRUE, repel = TRUE, group.by = 'type.manual.v1', split.by = "samp.ident")
+```
+
+# Plot some genes
+```{r}
+# Plotting markers of MUC13_DMBT1 positive cells that the reference database uses to classify cell types, except Slc5a12 which no-one expresses, and GuCa2b, Mir194-2, and Btnl3, which weren't found.
+FeaturePlot(das.dat, features = c("Isx","Enpp7","Tm4sf20","Si","Slc17a4","Aldob","Cdx1","Dmbt1","Chp2","Krt20","Adra2a"))
+
+FeaturePlot(das.dat, features = "Ddr2", split.by = "treat.ident")
+```
+
+# Plot some potential drug targets
+```{r}
+FeaturePlot(das.dat, features = "Nupr1", split.by = "treat.ident")
+FeaturePlot(das.dat, features = "Cd4", split.by = "treat.ident")
+FeaturePlot(das.dat, features = "Erbb2", split.by = "treat.ident")
+FeaturePlot(das.dat, features = "Pdcd1", split.by = "treat.ident")
+```
+
+# Look for differentially expressed genes between cluster 8 and the rest of the dataset
+-   This seems like the next most sensible thing to do, as cluster 8 is the only one present in both treated samples but not controls (although it/a similar cluster is present in controls for other drugs), so is potentially likely to be involved in drug response.
+-   If you have time, just do this controls vs treated, using the 10X differential expression with pseudobulking guide.
+# To try?
+-   Generating all das markers including negative, and seeing if sc-type can annotate better with these. Likely won't make any difference as database doesn't have any negative markers for the stomach
+-   Could use violin plots for gene expression between clusters instead of dotplots since it's a bit more scientific and vibes better with the clusters/cell types and showing where they are (plus you don't have to worry about changing the shape of dots to define only a single cluster)
+################################################################## Insanity - stick together groups to make a table
+########### Double check the info on if scale data is the normalised data (scale is just for plotting apparently). Make groups for all of your Cdh1 negative cell types and run DE between the treatment and control
+# Split up dasatanib data by treatment type for DE analysis
+### Non-pseudo bulked differential expression analysis. Irrelevant to thesis
+### Many of these won't currently work anyway, since they rely on outdated cluster names (e.g. "Cancer Cells" at this point is "Proliferating Epithelial Cells")
+```{r}
+# Split das dat into two elements of a list
+das.dat.list <- SplitObject(das.dat, split.by = "treat.ident")
+# Don't re-normalise, or add any additional information, just go from here
+
+# Create a table containing cell types in each dataset and run a chisq test to look for a difference between proportions of cell types in each
+# See if you can also do this while excluding enterocytes
+control.cell.counts <- das.dat.list[["Das - control"]]@meta.data[["type.manual.v1"]]
+table(control.cell.counts)
+dasatinib.cell.counts <- das.dat.list[["Das - drug"]]@meta.data[["type.manual.v1"]] # %>% .[-5]
+table(dasatinib.cell.counts)
+
+# Run a Chi-squared test on the data and show a proportion table of cell types in each group.
+cbind(table(control.cell.counts), table(dasatinib.cell.counts)) %>% chisq.test()
+cbind(table(control.cell.counts), table(dasatinib.cell.counts)) %>% prop.table(.,2)
+
+
+# Make objects of log normalised RNA expression
+das.control_dat <- das.dat.list[["Das - control"]]@assays[["RNA"]]@data
+das.dasatinib_dat <- das.dat.list[["Das - drug"]]@assays[["RNA"]]@data
+
+# Check number of genes and cells in each dataset
+das.dat.list[["Das - control"]]@assays[["RNA"]]@data %>% dim()
+# 1616 control cells
+das.dat.list[["Das - drug"]]@assays[["RNA"]]@data %>% dim()
+# 1155 drugged cells
+
+# Make objects of treatments per cell
+das.control.treat <- das.dat.list[["Das - control"]]@meta.data[["treat.ident"]]
+das.dasatinib.treat <- das.dat.list[["Das - drug"]]@meta.data[["treat.ident"]]
+
+# Make objects of annotated cluster ids per cell
+das.control.clusters <- das.dat.list[["Das - control"]]@meta.data[["type.manual.v1"]]
+das.dasatinib.clusters <- das.dat.list[["Das - drug"]]@meta.data[["type.manual.v1"]]
+
+# Make objects of cluster number per cell
+das.control.numerical.clusters <- das.dat.list[["Das - control"]]@meta.data[["seurat_clusters"]]
+das.dasatinib.numerical.clusters <- das.dat.list[["Das - drug"]]@meta.data[["seurat_clusters"]]
+
+# Genes with positive logFC mean they're more highly expressed in the dasatinib group
+```
+
+# DE on "Pit Cells"
+```{r}
+# Define the cell type you want to extract
+cluster.type <- "Pit Cells"
+# Subset data and run differential expression analysis on Pit Cells
+das.control.foveolar <- das.control_dat[, das.control.clusters == cluster.type]
+das.dasatinib.foveolar <- das.dasatinib_dat[, das.dasatinib.clusters == cluster.type]
+das.combined.foveolar <- cbind(das.control.foveolar, das.dasatinib.foveolar)
+das.groups.tmp <- c(das.control.treat[das.control.clusters == cluster.type], das.dasatinib.treat[das.dasatinib.clusters == cluster.type])
+
+# Define grouping variable more clearly for limma
+group <- ifelse(das.groups.tmp == "Das - control", "control", "dasatinib")
+# Create design matrix: looks good
+design <- model.matrix(~group);
+colnames(design) <- c("Mean", "ControlVsDasatinib")
+design %>% head()
+# Fit linear model
+fit <- lmFit(as.matrix(das.combined.foveolar), design)
+fit <- eBayes(fit)
+tt.foveolar <- topTable(fit, coef = "ControlVsDasatinib", adjust = "BH", n = nrow(das.combined.foveolar))
+# Sum number of significantly DE genes in tt
+sum(tt.foveolar$adj.P.Val<0.05)
+# Report names of significantly DE genes
+rownames(tt.foveolar[tt.foveolar$adj.P.Val < 0.05,])
+DE.foveolar <- rownames(tt.foveolar[tt.foveolar$adj.P.Val < 0.05,])
+```
+
+# DE on "Fibroblasts A"
+```{r}
+# Define the cell type you want to extract
+cluster.type <- "Fibroblasts A"
+# Subset data and run differential expression analysis on fibroblasts
+das.control.fibroblast.a <- das.control_dat[, das.control.clusters == cluster.type]
+das.dasatinib.fibroblast.a <- das.dasatinib_dat[, das.dasatinib.clusters == cluster.type]
+das.combined.fibroblast.a <- cbind(das.control.fibroblast.a, das.dasatinib.fibroblast.a)
+das.groups.tmp <- c(das.control.treat[das.control.clusters == cluster.type], das.dasatinib.treat[das.dasatinib.clusters == cluster.type])
+
+# Define grouping variable more clearly for limma
+group <- ifelse(das.groups.tmp == "Das - control", "control", "dasatinib")
+# Create design matrix: looks good
+design <- model.matrix(~group);
+colnames(design) <- c("Mean", "ControlVsDasatinib")
+design %>% head()
+# Fit linear model
+fit <- lmFit(as.matrix(das.combined.fibroblast.a), design)
+fit <- eBayes(fit)
+tt.fibroblast.a <- topTable(fit, coef = "ControlVsDasatinib", adjust = "BH", n = nrow(das.combined.fibroblast.a))
+# Sum number of significantly DE genes in tt
+sum(tt.fibroblast.a$adj.P.Val<0.05)
+# Report names of significantly DE genes
+rownames(tt.fibroblast.a[tt.fibroblast.a$adj.P.Val < 0.05,])
+DE.fibroblast.a <- rownames(tt.fibroblast.a[tt.fibroblast.a$adj.P.Val < 0.05,])
+```
+
+# DE on "Macrophages"
+```{r}
+# Define the cell type you want to extract
+cluster.type <- "Macrophages"
+# Subset data and run differential expression analysis on macrophages
+das.control.macrophage <- das.control_dat[, das.control.clusters == cluster.type]
+das.dasatinib.macrophage <- das.dasatinib_dat[, das.dasatinib.clusters == cluster.type]
+das.combined.macrophage <- cbind(das.control.macrophage, das.dasatinib.macrophage)
+das.groups.tmp <- c(das.control.treat[das.control.clusters == cluster.type], das.dasatinib.treat[das.dasatinib.clusters == cluster.type])
+
+# Define grouping variable more clearly for limma
+group <- ifelse(das.groups.tmp == "Das - control", "control", "dasatinib")
+# Create design matrix: looks good
+design <- model.matrix(~group);
+colnames(design) <- c("Mean", "ControlVsDasatinib")
+design %>% head()
+# Fit linear model
+fit <- lmFit(as.matrix(das.combined.macrophage), design)
+fit <- eBayes(fit)
+tt.macrophage <- topTable(fit, coef = "ControlVsDasatinib", adjust = "BH", n = nrow(das.combined.macrophage))
+# Sum number of significantly DE genes in tt
+sum(tt.macrophage$adj.P.Val<0.05)
+# Report names of significantly DE genes
+rownames(tt.macrophage[tt.macrophage$adj.P.Val < 0.05,])
+DE.macrophage <- rownames(tt.macrophage[tt.macrophage$adj.P.Val < 0.05,])
+```
+
+# DE on "Mesothelial Cells A"
+```{r}
+# Define the cell type you want to extract
+cluster.type <- "Mesothelial Cells A"
+# Subset data and run differential expression analysis on mesothelial cells
+das.control.mesothelial.a <- das.control_dat[, das.control.clusters == cluster.type]
+das.dasatinib.mesothelial.a <- das.dasatinib_dat[, das.dasatinib.clusters == cluster.type]
+das.combined.mesothelial.a <- cbind(das.control.mesothelial.a, das.dasatinib.mesothelial.a)
+das.groups.tmp <- c(das.control.treat[das.control.clusters == cluster.type], das.dasatinib.treat[das.dasatinib.clusters == cluster.type])
+
+# Define grouping variable more clearly for limma
+group <- ifelse(das.groups.tmp == "Das - control", "control", "dasatinib")
+# Create design matrix: looks good
+design <- model.matrix(~group);
+colnames(design) <- c("Mean", "ControlVsDasatinib")
+design %>% head()
+# Fit linear model
+fit <- lmFit(as.matrix(das.combined.mesothelial.a), design)
+fit <- eBayes(fit)
+tt.mesothelial.a <- topTable(fit, coef = "ControlVsDasatinib", adjust = "BH", n = nrow(das.combined.mesothelial.a))
+# Sum number of significantly DE genes in tt
+sum(tt.mesothelial.a$adj.P.Val<0.05)
+# Report names of significantly DE genes
+rownames(tt.mesothelial.a[tt.mesothelial.a$adj.P.Val < 0.05,])
+DE.mesothelial.a <- rownames(tt.mesothelial.a[tt.mesothelial.a$adj.P.Val < 0.05,])
+```
+
+# DE on "Cancer Cells"
+```{r}
+# Define the cell type you want to extract
+cluster.type <- "Cancer Cells"
+# Subset data and run differential expression analysis on cancer cells
+das.control.cancer <- das.control_dat[, das.control.clusters == cluster.type]
+das.dasatinib.cancer <- das.dasatinib_dat[, das.dasatinib.clusters == cluster.type]
+das.combined.cancer <- cbind(das.control.cancer, das.dasatinib.cancer)
+das.groups.tmp <- c(das.control.treat[das.control.clusters == cluster.type], das.dasatinib.treat[das.dasatinib.clusters == cluster.type])
+
+# Define grouping variable more clearly for limma
+group <- ifelse(das.groups.tmp == "Das - control", "control", "dasatinib")
+# Create design matrix: looks good
+design <- model.matrix(~group);
+colnames(design) <- c("Mean", "ControlVsDasatinib")
+design %>% head()
+# Fit linear model
+fit <- lmFit(as.matrix(das.combined.cancer), design)
+fit <- eBayes(fit)
+tt.cancer <- topTable(fit, coef = "ControlVsDasatinib", adjust = "BH", n = nrow(das.combined.cancer))
+# Sum number of significantly DE genes in tt
+sum(tt.cancer$adj.P.Val<0.05)
+# Report names of significantly DE genes
+rownames(tt.cancer[tt.cancer$adj.P.Val < 0.05,])
+DE.cancer <- rownames(tt.cancer[tt.cancer$adj.P.Val < 0.05,])
+```
+
+# DE on "T Cells"
+```{r}
+# Define the cell type you want to extract
+cluster.type <- "T Cells"
+# Subset data and run differential expression analysis on T cells
+das.control.T <- das.control_dat[, das.control.clusters == cluster.type]
+das.dasatinib.T <- das.dasatinib_dat[, das.dasatinib.clusters == cluster.type]
+das.combined.T <- cbind(das.control.T, das.dasatinib.T)
+das.groups.tmp <- c(das.control.treat[das.control.clusters == cluster.type], das.dasatinib.treat[das.dasatinib.clusters == cluster.type])
+
+# Define grouping variable more clearly for limma
+group <- ifelse(das.groups.tmp == "Das - control", "control", "dasatinib")
+# Create design matrix: looks good
+design <- model.matrix(~group);
+colnames(design) <- c("Mean", "ControlVsDasatinib")
+design %>% head()
+# Fit linear model
+fit <- lmFit(as.matrix(das.combined.T), design)
+fit <- eBayes(fit)
+tt.T <- topTable(fit, coef = "ControlVsDasatinib", adjust = "BH", n = nrow(das.combined.T))
+# Sum number of significantly DE genes in tt
+sum(tt.T$adj.P.Val<0.05)
+# Report names of significantly DE genes
+rownames(tt.T[tt.T$adj.P.Val < 0.05,])
+DE.T <- rownames(tt.T[tt.T$adj.P.Val < 0.05,])
+```
+
+# DE on "Chief Cells"
+```{r}
+# Define the cell type you want to extract
+cluster.type <- "Chief Cells"
+# Subset data and run differential expression analysis on Chief Cells
+das.control.chief <- das.control_dat[, das.control.clusters == cluster.type]
+das.dasatinib.chief <- das.dasatinib_dat[, das.dasatinib.clusters == cluster.type]
+das.combined.chief <- cbind(das.control.chief, das.dasatinib.chief)
+das.groups.tmp <- c(das.control.treat[das.control.clusters == cluster.type], das.dasatinib.treat[das.dasatinib.clusters == cluster.type])
+
+# Define grouping variable more clearly for limma
+group <- ifelse(das.groups.tmp == "Das - control", "control", "dasatinib")
+# Create design matrix: looks good
+design <- model.matrix(~group);
+colnames(design) <- c("Mean", "ControlVsDasatinib")
+design %>% head()
+# Fit linear model
+fit <- lmFit(as.matrix(das.combined.chief), design)
+fit <- eBayes(fit)
+tt.chief <- topTable(fit, coef = "ControlVsDasatinib", adjust = "BH", n = nrow(das.combined.chief))
+# Sum number of significantly DE genes in tt
+sum(tt.chief$adj.P.Val<0.05)
+# Report names of significantly DE genes
+rownames(tt.chief[tt.chief$adj.P.Val < 0.05,])
+DE.chief <- rownames(tt.chief[tt.chief$adj.P.Val < 0.05,])
+```
+
+# DE on "Mucous Cells"
+```{r}
+# Define the cell type you want to extract
+cluster.type <- "Mucous Cells"
+# Subset data and run differential expression analysis on mucous gland cells
+das.control.deep.mucous.gland <- das.control_dat[, das.control.clusters == cluster.type]
+das.dasatinib.deep.mucous.gland <- das.dasatinib_dat[, das.dasatinib.clusters == cluster.type]
+das.combined.deep.mucous.gland <- cbind(das.control.deep.mucous.gland, das.dasatinib.deep.mucous.gland)
+das.groups.tmp <- c(das.control.treat[das.control.clusters == cluster.type], das.dasatinib.treat[das.dasatinib.clusters == cluster.type])
+
+# Define grouping variable more clearly for limma
+group <- ifelse(das.groups.tmp == "Das - control", "control", "dasatinib")
+# Create design matrix: looks good
+design <- model.matrix(~group);
+colnames(design) <- c("Mean", "ControlVsDasatinib")
+design %>% head()
+# Fit linear model
+fit <- lmFit(as.matrix(das.combined.deep.mucous.gland), design)
+fit <- eBayes(fit)
+tt.deep.mucous.gland <- topTable(fit, coef = "ControlVsDasatinib", adjust = "BH", n = nrow(das.combined.deep.mucous.gland))
+# Sum number of significantly DE genes in tt
+sum(tt.deep.mucous.gland$adj.P.Val<0.05)
+# Report names of significantly DE genes
+rownames(tt.deep.mucous.gland[tt.deep.mucous.gland$adj.P.Val < 0.05,])
+DE.deep.mucous.gland <- rownames(tt.deep.mucous.gland[tt.deep.mucous.gland$adj.P.Val < 0.05,])
+```
+
+# DE on "Smooth Muscle Cells"
+```{r}
+# Define the cell type you want to extract
+cluster.type <- "Smooth Muscle Cells"
+# Subset data and run differential expression analysis on smooth muscle cells
+das.control.smooth.muscle <- das.control_dat[, das.control.clusters == cluster.type]
+das.dasatinib.smooth.muscle <- das.dasatinib_dat[, das.dasatinib.clusters == cluster.type]
+das.combined.smooth.muscle <- cbind(das.control.smooth.muscle, das.dasatinib.smooth.muscle)
+das.groups.tmp <- c(das.control.treat[das.control.clusters == cluster.type], das.dasatinib.treat[das.dasatinib.clusters == cluster.type])
+
+# Define grouping variable more clearly for limma
+group <- ifelse(das.groups.tmp == "Das - control", "control", "dasatinib")
+# Create design matrix: looks good
+design <- model.matrix(~group);
+colnames(design) <- c("Mean", "ControlVsDasatinib")
+design %>% head()
+# Fit linear model
+fit <- lmFit(as.matrix(das.combined.smooth.muscle), design)
+fit <- eBayes(fit)
+tt.smooth.muscle <- topTable(fit, coef = "ControlVsDasatinib", adjust = "BH", n = nrow(das.combined.smooth.muscle))
+# Sum number of significantly DE genes in tt
+sum(tt.smooth.muscle$adj.P.Val<0.05)
+# Report names of significantly DE genes
+rownames(tt.smooth.muscle[tt.smooth.muscle$adj.P.Val < 0.05,])
+DE.smooth.muscle <- rownames(tt.smooth.muscle[tt.smooth.muscle$adj.P.Val < 0.05,])
+```
+
+# DE on "Parietal Cells"
+```{r}
+# Define the cell type you want to extract
+cluster.type <- "Parietal Cells"
+# Subset data and run differential expression analysis on parietal cells
+das.control.parietal <- das.control_dat[, das.control.clusters == cluster.type]
+das.dasatinib.parietal <- das.dasatinib_dat[, das.dasatinib.clusters == cluster.type]
+das.combined.parietal <- cbind(das.control.parietal, das.dasatinib.parietal)
+das.groups.tmp <- c(das.control.treat[das.control.clusters == cluster.type], das.dasatinib.treat[das.dasatinib.clusters == cluster.type])
+
+# Define grouping variable more clearly for limma
+group <- ifelse(das.groups.tmp == "Das - control", "control", "dasatinib")
+# Create design matrix: looks good
+design <- model.matrix(~group);
+colnames(design) <- c("Mean", "ControlVsDasatinib")
+design %>% head()
+# Fit linear model
+fit <- lmFit(as.matrix(das.combined.parietal), design)
+fit <- eBayes(fit)
+tt.parietal <- topTable(fit, coef = "ControlVsDasatinib", adjust = "BH", n = nrow(das.combined.parietal))
+# Sum number of significantly DE genes in tt
+sum(tt.parietal$adj.P.Val<0.05)
+# Report names of significantly DE genes
+rownames(tt.parietal[tt.parietal$adj.P.Val < 0.05,])
+DE.parietal <- rownames(tt.parietal[tt.parietal$adj.P.Val < 0.05,])
+```
+
+# DE on "Enterocytes"
+```{r}
+# Define the cell type you want to extract
+cluster.type <- "Enterocytes"
+# Subset data and run differential expression analysis on enterocytes
+das.control.enterocytes <- das.control_dat[, das.control.clusters == cluster.type]
+das.dasatinib.enterocytes <- das.dasatinib_dat[, das.dasatinib.clusters == cluster.type]
+das.combined.enterocytes <- cbind(das.control.enterocytes, das.dasatinib.enterocytes)
+das.groups.tmp <- c(das.control.treat[das.control.clusters == cluster.type], das.dasatinib.treat[das.dasatinib.clusters == cluster.type])
+
+# Define grouping variable more clearly for limma
+group <- ifelse(das.groups.tmp == "Das - control", "control", "dasatinib")
+# Create design matrix: looks good
+design <- model.matrix(~group);
+colnames(design) <- c("Mean", "ControlVsDasatinib")
+design %>% head()
+# Fit linear model
+fit <- lmFit(as.matrix(das.combined.enterocytes), design)
+fit <- eBayes(fit)
+tt.enterocytes <- topTable(fit, coef = "ControlVsDasatinib", adjust = "BH", n = nrow(das.combined.enterocytes))
+# Sum number of significantly DE genes in tt
+sum(tt.enterocytes$adj.P.Val<0.05)
+# Report names of significantly DE genes
+rownames(tt.enterocytes[tt.enterocytes$adj.P.Val < 0.05,])
+DE.enterocytes <- rownames(tt.enterocytes[tt.enterocytes$adj.P.Val < 0.05,])
+```
+
+# DE on "Mesothelial Cells B"
+```{r}
+# Define the cell type you want to extract
+cluster.type <- "Mesothelial Cells B"
+# Subset data and run differential expression analysis on mesothelial cells B
+das.control.mesothelial.b <- das.control_dat[, das.control.clusters == cluster.type]
+das.dasatinib.mesothelial.b <- das.dasatinib_dat[, das.dasatinib.clusters == cluster.type]
+das.combined.mesothelial.b <- cbind(das.control.mesothelial.b, das.dasatinib.mesothelial.b)
+das.groups.tmp <- c(das.control.treat[das.control.clusters == cluster.type], das.dasatinib.treat[das.dasatinib.clusters == cluster.type])
+
+# Define grouping variable more clearly for limma
+group <- ifelse(das.groups.tmp == "Das - control", "control", "dasatinib")
+# Create design matrix: looks good
+design <- model.matrix(~group);
+colnames(design) <- c("Mean", "ControlVsDasatinib")
+design %>% head()
+# Fit linear model
+fit <- lmFit(as.matrix(das.combined.mesothelial.b), design)
+fit <- eBayes(fit)
+tt.mesothelial.b <- topTable(fit, coef = "ControlVsDasatinib", adjust = "BH", n = nrow(das.combined.mesothelial.b))
+# Sum number of significantly DE genes in tt
+sum(tt.mesothelial.b$adj.P.Val<0.05)
+# Report names of significantly DE genes
+rownames(tt.mesothelial.b[tt.mesothelial.b$adj.P.Val < 0.05,])
+DE.mesothelial.b <- rownames(tt.mesothelial.b[tt.mesothelial.b$adj.P.Val < 0.05,])
+```
+
+# DE on "B Cells"
+```{r}
+# Define the cell type you want to extract
+cluster.type <- "B Cells"
+# Subset data and run differential expression analysis on B cells
+das.control.B <- das.control_dat[, das.control.clusters == cluster.type]
+das.dasatinib.B <- das.dasatinib_dat[, das.dasatinib.clusters == cluster.type]
+das.combined.B <- cbind(das.control.B, das.dasatinib.B)
+das.groups.tmp <- c(das.control.treat[das.control.clusters == cluster.type], das.dasatinib.treat[das.dasatinib.clusters == cluster.type])
+
+# Define grouping variable more clearly for limma
+group <- ifelse(das.groups.tmp == "Das - control", "control", "dasatinib")
+# Create design matrix: looks good
+design <- model.matrix(~group);
+colnames(design) <- c("Mean", "ControlVsDasatinib")
+design %>% head()
+# Fit linear model
+fit <- lmFit(as.matrix(das.combined.B), design)
+fit <- eBayes(fit)
+tt.B <- topTable(fit, coef = "ControlVsDasatinib", adjust = "BH", n = nrow(das.combined.B))
+# Sum number of significantly DE genes in tt
+sum(tt.B$adj.P.Val<0.05)
+# Report names of significantly DE genes
+rownames(tt.B[tt.B$adj.P.Val < 0.05,])
+DE.B <- rownames(tt.B[tt.B$adj.P.Val < 0.05,])
+```
+
+# DE on "Endothelial Cells"
+```{r}
+# Define the cell type you want to extract
+cluster.type <- "Endothelial Cells"
+# Subset data and run differential expression analysis on endothelial cells
+das.control.endothelial <- das.control_dat[, das.control.clusters == cluster.type]
+das.dasatinib.endothelial <- das.dasatinib_dat[, das.dasatinib.clusters == cluster.type]
+das.combined.endothelial <- cbind(das.control.endothelial, das.dasatinib.endothelial)
+das.groups.tmp <- c(das.control.treat[das.control.clusters == cluster.type], das.dasatinib.treat[das.dasatinib.clusters == cluster.type])
+
+# Define grouping variable more clearly for limma
+group <- ifelse(das.groups.tmp == "Das - control", "control", "dasatinib")
+# Create design matrix: looks good
+design <- model.matrix(~group);
+colnames(design) <- c("Mean", "ControlVsDasatinib")
+design %>% head()
+# Fit linear model
+fit <- lmFit(as.matrix(das.combined.endothelial), design)
+fit <- eBayes(fit)
+tt.endothelial <- topTable(fit, coef = "ControlVsDasatinib", adjust = "BH", n = nrow(das.combined.endothelial))
+# Sum number of significantly DE genes in tt
+sum(tt.endothelial$adj.P.Val<0.05)
+# Report names of significantly DE genes
+rownames(tt.endothelial[tt.endothelial$adj.P.Val < 0.05,])
+DE.endothelial <- rownames(tt.endothelial[tt.endothelial$adj.P.Val < 0.05,])
+```
+
+# DE on "Fibroblasts B"
+```{r}
+# Define the cell type you want to extract
+cluster.type <- "Fibroblasts B"
+# Subset data and run differential expression analysis on fibroblasts B
+das.control.fibroblast.b <- das.control_dat[, das.control.clusters == cluster.type]
+das.dasatinib.fibroblast.b <- das.dasatinib_dat[, das.dasatinib.clusters == cluster.type]
+das.combined.fibroblast.b <- cbind(das.control.fibroblast.b, das.dasatinib.fibroblast.b)
+das.groups.tmp <- c(das.control.treat[das.control.clusters == cluster.type], das.dasatinib.treat[das.dasatinib.clusters == cluster.type])
+
+# Define grouping variable more clearly for limma
+group <- ifelse(das.groups.tmp == "Das - control", "control", "dasatinib")
+# Create design matrix: looks good
+design <- model.matrix(~group);
+colnames(design) <- c("Mean", "ControlVsDasatinib")
+design %>% head()
+# Fit linear model
+fit <- lmFit(as.matrix(das.combined.fibroblast.b), design)
+fit <- eBayes(fit)
+tt.fibroblast.b <- topTable(fit, coef = "ControlVsDasatinib", adjust = "BH", n = nrow(das.combined.fibroblast.b))
+# Sum number of significantly DE genes in tt
+sum(tt.fibroblast.b$adj.P.Val<0.05)
+# Report names of significantly DE genes
+rownames(tt.fibroblast.b[tt.fibroblast.b$adj.P.Val < 0.05,])
+DE.fibroblast.b <- rownames(tt.fibroblast.b[tt.fibroblast.b$adj.P.Val < 0.05,])
+```
+
+# DE on "Unknown"
+```{r}
+# Define the cell type you want to extract
+cluster.type <- "Unknown"
+# Subset data and run differential expression analysis on unknown
+das.control.unknown <- das.control_dat[, das.control.clusters == cluster.type]
+das.dasatinib.unknown <- das.dasatinib_dat[, das.dasatinib.clusters == cluster.type]
+das.combined.unknown <- cbind(das.control.unknown, das.dasatinib.unknown)
+das.groups.tmp <- c(das.control.treat[das.control.clusters == cluster.type], das.dasatinib.treat[das.dasatinib.clusters == cluster.type])
+
+# Define grouping variable more clearly for limma
+group <- ifelse(das.groups.tmp == "Das - control", "control", "dasatinib")
+# Create design matrix: looks good
+design <- model.matrix(~group);
+colnames(design) <- c("Mean", "ControlVsDasatinib")
+design %>% head()
+# Fit linear model
+fit <- lmFit(as.matrix(das.combined.unknown), design)
+fit <- eBayes(fit)
+tt.unknown <- topTable(fit, coef = "ControlVsDasatinib", adjust = "BH", n = nrow(das.combined.unknown))
+# Sum number of significantly DE genes in tt
+sum(tt.unknown$adj.P.Val<0.05)
+# Report names of significantly DE genes
+rownames(tt.unknown[tt.unknown$adj.P.Val < 0.05,])
+DE.unknown <- rownames(tt.unknown[tt.unknown$adj.P.Val < 0.05,])
+```
+
+# DE on "Neutrophils"
+```{r}
+# Define the cell type you want to extract
+cluster.type <- "Neutrophils"
+# Subset data and run differential expression analysis on neutrophils
+das.control.neutrophils <- das.control_dat[, das.control.clusters == cluster.type]
+das.dasatinib.neutrophils <- das.dasatinib_dat[, das.dasatinib.clusters == cluster.type]
+das.combined.neutrophils <- cbind(das.control.neutrophils, das.dasatinib.neutrophils)
+das.groups.tmp <- c(das.control.treat[das.control.clusters == cluster.type], das.dasatinib.treat[das.dasatinib.clusters == cluster.type])
+
+# Define grouping variable more clearly for limma
+group <- ifelse(das.groups.tmp == "Das - control", "control", "dasatinib")
+# Create design matrix: looks good
+design <- model.matrix(~group);
+colnames(design) <- c("Mean", "ControlVsDasatinib")
+design %>% head()
+# Fit linear model
+fit <- lmFit(as.matrix(das.combined.neutrophils), design)
+fit <- eBayes(fit)
+tt.neutrophils <- topTable(fit, coef = "ControlVsDasatinib", adjust = "BH", n = nrow(das.combined.neutrophils))
+# Sum number of significantly DE genes in tt
+sum(tt.neutrophils$adj.P.Val<0.05)
+# Report names of significantly DE genes
+rownames(tt.neutrophils[tt.neutrophils$adj.P.Val < 0.05,])
+DE.neutrophils <- rownames(tt.neutrophils[tt.neutrophils$adj.P.Val < 0.05,])
+```
+
+# DE on "Enteroendocrine Cells"
+```{r}
+# Define the cell type you want to extract
+cluster.type <- "Enteroendocrine Cells"
+# Subset data and run differential expression analysis on enteroendocrine cells
+das.control.enteroendocrine <- das.control_dat[, das.control.clusters == cluster.type]
+das.dasatinib.enteroendocrine <- das.dasatinib_dat[, das.dasatinib.clusters == cluster.type]
+das.combined.enteroendocrine <- cbind(das.control.enteroendocrine, das.dasatinib.enteroendocrine)
+das.groups.tmp <- c(das.control.treat[das.control.clusters == cluster.type], das.dasatinib.treat[das.dasatinib.clusters == cluster.type])
+
+# Define grouping variable more clearly for limma
+group <- ifelse(das.groups.tmp == "Das - control", "control", "dasatinib")
+# Create design matrix: looks good
+design <- model.matrix(~group);
+colnames(design) <- c("Mean", "ControlVsDasatinib")
+design %>% head()
+# Fit linear model
+fit <- lmFit(as.matrix(das.combined.enteroendocrine), design)
+fit <- eBayes(fit)
+tt.enteroendocrine <- topTable(fit, coef = "ControlVsDasatinib", adjust = "BH", n = nrow(das.combined.enteroendocrine))
+# Sum number of significantly DE genes in tt
+sum(tt.enteroendocrine$adj.P.Val<0.05)
+# Report names of significantly DE genes
+rownames(tt.enteroendocrine[tt.enteroendocrine$adj.P.Val < 0.05,])
+DE.enteroendocrine <- rownames(tt.enteroendocrine[tt.enteroendocrine$adj.P.Val < 0.05,])
+```
+
+# Create and save a table of top DE genes in each object
+```{r}
+# Create a list
+DE.Cdh1.neg <- list(DE.macrophage, DE.lymphatic, DE.serosal, DE.lymphoid, DE.fibroblast, DE.stromal)
+names(DE.Cdh1.neg) <- c("DE.macrophage", "DE.lymphatic", "DE.serosal", "DE.lymphoid", "DE.fibroblast", "DE.stromal")
+capture.output(DE.Cdh1.neg, file = "2_output/DE.Cdh1.neg.csv")
+```
+
+<!-- # Explore differential expression between Cdh1 negative and Cdh1 positive cells within epithelial clusters -->
+<!-- ```{r} -->
+<!-- # Define the cell types you want to extract (should be 312 controls) -->
+<!-- ctl.fov <- which(das.control.clusters == "Pit Cells") -->
+<!-- ctl.pyl <- which(das.control.clusters == "Pyloric gland/neck cells") -->
+<!-- ctl.par <- which(das.control.clusters == "Parietal cells") -->
+<!-- # Can't use ent cause all DE genes just become Ent markers -->
+<!-- # ctl.ent <- which(das.control.clusters == "Enterocytes") -->
+<!-- ctl.epithelial <- c(ctl.fov, ctl.pyl, ctl.par) %>% sort(.) -->
+
+<!-- # Should be 257 but there's 258? Fix this at some point but for now it seems ok. -->
+<!-- das.fov <- which(das.dasatinib.clusters == "Pit Cells") -->
+<!-- das.pyl <- which(das.dasatinib.clusters == "Pyloric gland/neck cells") -->
+<!-- das.par <- which(das.dasatinib.clusters == "Parietal cells") -->
+<!-- # Can't use ent cause all DE genes just become Ent markers -->
+<!-- # das.ent <- which(das.dasatinib.clusters == "Enterocytes") -->
+<!-- das.epithelial <- c(das.fov, das.pyl, das.par) %>% sort(.) -->
+
+<!-- # Subset data and run differential expression analysis on epithelial cells -->
+<!-- # Subset to epithelial -->
+<!-- das.control.epithelial <- das.control_dat[, ctl.epithelial] -->
+<!-- # Subset to Cdh1- only -->
+<!-- das.control.epithelial <- das.control.epithelial[, das.control.epithelial["Cdh1",] == 0] -->
+<!-- # Subset to epithelial -->
+<!-- das.dasatinib.epithelial <- das.dasatinib_dat[, das.epithelial] -->
+<!-- # Subset to Cdh1- only -->
+<!-- das.dasatinib.epithelial <- das.dasatinib.epithelial[, das.dasatinib.epithelial["Cdh1",] == 0] -->
+
+<!-- das.combined.epithelial <- cbind(das.control.epithelial, das.dasatinib.epithelial) -->
+
+<!-- das.groups.tmp <- rep(c("Das - control", "Das - drug"), c(ncol(das.control.epithelial), ncol(das.dasatinib.epithelial))) -->
+
+<!-- # Define grouping variable more clearly for limma -->
+<!-- group <- ifelse(das.groups.tmp == "Das - control", "control", "dasatinib") -->
+<!-- # Create design matrix: looks good -->
+<!-- design <- model.matrix(~group); -->
+<!-- colnames(design) <- c("Mean", "ControlVsDasatinib") -->
+<!-- design %>% head() -->
+<!-- # Fit linear model -->
+<!-- fit <- lmFit(as.matrix(das.combined.epithelial), design) -->
+<!-- fit <- eBayes(fit) -->
+<!-- tt.epithelial <- topTable(fit, coef = "ControlVsDasatinib", adjust = "BH", n = nrow(das.combined.epithelial)) -->
+<!-- # Sum number of significantly DE genes in tt -->
+<!-- sum(tt.epithelial$adj.P.Val<0.05) -->
+<!-- # Report names of significantly DE genes -->
+<!-- rownames(tt.epithelial[tt.epithelial$adj.P.Val < 0.05,]) -->
+<!-- DE.epithelial <- rownames(tt.epithelial[tt.epithelial$adj.P.Val < 0.05,]) -->
+<!-- ``` -->
+
+# Explore all epithelial cells, not just cdh1-
+```{r}
+# Define the cell types you want to extract in the controls
+ctl.fov <- which(das.control.clusters == "Pit Cells")
+ctl.chi <- which(das.control.clusters == "Chief Cells")
+ctl.muc <- which(das.control.clusters == "Mucous Cells")
+ctl.par <- which(das.control.clusters == "Parietal Cells")
+ctl.pro <- which(das.control.clusters == "Proliferating Epithelial Cells")
+ctl.epithelial.all <- c(ctl.fov, ctl.chi, ctl.muc, ctl.par, ctl.pro) %>% sort(.)
+
+# Define the cell types you want to extract in dasatinib samples
+das.fov <- which(das.dasatinib.clusters == "Pit Cells")
+das.chi <- which(das.dasatinib.clusters == "Chief Cells")
+das.muc <- which(das.dasatinib.clusters == "Mucous Cells")
+das.par <- which(das.dasatinib.clusters == "Parietal Cells")
+das.pro <- which(das.dasatinib.clusters == "Proliferating Epithelial Cells")
+das.epithelial.all <- c(das.fov, das.chi, das.muc, das.par, das.pro) %>% sort(.)
+
+# Subset data and run differential expression analysis on epithelial.all cells
+# Subset to epithelial.all
+das.control.epithelial.all <- das.control_dat[, ctl.epithelial.all]
+# Subset to epithelial
+das.dasatinib.epithelial.all <- das.dasatinib_dat[, das.epithelial.all]
+
+das.combined.epithelial.all <- cbind(das.control.epithelial.all, das.dasatinib.epithelial.all)
+
+das.groups.tmp <- rep(c("Das - control", "Das - drug"), c(ncol(das.control.epithelial.all), ncol(das.dasatinib.epithelial.all)))
+
+# Define grouping variable more clearly for limma
+group <- ifelse(das.groups.tmp == "Das - control", "control", "dasatinib")
+# Create design matrix: looks good
+design <- model.matrix(~group);
+colnames(design) <- c("Mean", "ControlVsDasatinib")
+design %>% head()
+# Fit linear model
+fit <- lmFit(as.matrix(das.combined.epithelial.all), design)
+fit <- eBayes(fit)
+tt.epithelial.all <- topTable(fit, coef = "ControlVsDasatinib", adjust = "BH", n = nrow(das.combined.epithelial.all))
+# Sum number of significantly DE genes in tt
+sum(tt.epithelial.all$adj.P.Val<0.05)
+# Report names of significantly DE genes
+rownames(tt.epithelial.all[tt.epithelial.all$adj.P.Val < 0.05,])
+DE.epithelial.all <- rownames(tt.epithelial.all[tt.epithelial.all$adj.P.Val < 0.05,])
+
+# Pull out which of these are significant
+sig.tt.epithelial.all <- tt.epithelial.all[tt.epithelial.all$adj.P.Val < 0.05,]
+# Sum how many are up in response to dasatinib
+nrow(sig.tt.epithelial.all[sig.tt.epithelial.all$logFC > 0,])
+# Sum how many are down in response to dasatinib
+rownames(sig.tt.epithelial.all)[sig.tt.epithelial.all$logFC < 0] %>% cat()
+
+## Jank Output
+sig.tt.epithelial.all$rownames <- rownames(sig.tt.epithelial.all)
+write.csv(sig.tt.epithelial.all[,c("rownames","adj.P.Val")], row.names = FALSE, file = "2_output/epithelial_up_down.csv")
+
+# Tidy but old output
+write.csv(rownames(sig.tt.epithelial.all)[sig.tt.epithelial.all$logFC < 0], file = "2_output/epithelial_down.csv")
+write.csv(rownames(sig.tt.epithelial.all), row.names = FALSE, file = "2_output/epithelial_up_down.csv")
+write.csv(rownames(sig.tt.epithelial.all)[sig.tt.epithelial.all$logFC > 0], file = "2_output/epithelial_up.csv")
+
+write.csv(rownames(sig.tt.epithelial.all), file = "2_output/epithelial_up_down.csv", row.names = FALSE, col.names = FALSE)
+
+tstats <- fit$t[,1]
+index <- gsea.reactome.enriched$leadingEdge[4] %>% as.vector()
+barcodeplot(tstats, index)
+```
+
+### Run GSEA analysis on epithelial all DE genes
+```{r}
+# Create list of genes ranked by t statistic for gsea
+tt.epithelial.all.gsea <- data.table(tt.epithelial.all, keep.rownames = T)
+ranks.gsea <- tt.epithelial.all.gsea[order(t), list(rn, t)]
+
+# Convert gene names to EntrezIDs
+ranks.gsea$rn <- AnnotationDbi::select(mm,
+                                       keys = ranks.gsea$rn,
+                                       columns = "ENTREZID",
+                                       keytype = "SYMBOL") %>% .[,"ENTREZID"]
+# Remove NA's where symbols haven't mapped to entrez IDs
+ranks.gsea <- na.omit(ranks.gsea)
+
+# Find reactome pathways
+gsea.reactome <- reactomePathways(ranks.gsea$rn)
+
+# Convert ranks.gsea to the right format (named t stats) for analysis
+ranks.gsea.v2 <- ranks.gsea$t
+names(ranks.gsea.v2) <- ranks.gsea$rn
+# Remove duplicates
+# ranks.gsea.v2 <- ranks.gsea.v2[!duplicated(names(ranks.gsea.v2))]
+
+# Test for significant pathway over-representation
+gsea.reactome.enriched <- fgsea(gsea.reactome, ranks.gsea.v2, maxSize = 500, minSize = 20) %>% .[order(padj),] %>% .[.$padj < 0.05,]
+# 224 paths
+
+gsea.reactome.enriched <- fgsea(gsea.reactome, ranks.gsea.v2) %>% .[order(padj),] %>% .[.$padj < 0.05,]
+# 181 paths
+
+write.table(gsea.reactome.enriched[,-"leadingEdge"], file = "2_output/gsea_reactome_enriched.csv", sep = ",", row.names = F)
+```
+
+# Write out all toptables so that you have them saved as files for posterity
+```{r}
+# tt.epithelial.all
+write.csv(tt.epithelial.all, file = "2_output/tt_epithelial.csv")
+
+# tt.fibroblast
+write.csv(tt.fibroblast, file = "2_output/tt_fibroblast.csv")
+
+# tt.foveolar
+write.csv(tt.foveolar, file = "2_output/tt_foveolar.csv")
+
+# tt.lymphatic
+write.csv(tt.lymphatic, file = "2_output/tt_lymphatic.csv")
+
+# tt.lymphoid
+write.csv(tt.lymphoid, file = "2_output/tt_lymphoid.csv")
+
+# tt.macrophage
+write.csv(tt.macrophage, file = "2_output/tt_macrophage.csv")
+
+# tt.pancreatic
+write.csv(tt.pancreatic, file = "2_output/tt_pancreatic.csv")
+
+# tt.parietal
+write.csv(tt.parietal, file = "2_output/tt_parietal.csv")
+
+# tt.pyloric
+write.csv(tt.pyloric, file = "2_output/tt_pyloric.csv")
+
+# tt.serosal
+write.csv(tt.serosal, file = "2_output/tt_serosal.csv")
+
+# tt.stromal
+write.csv(tt.stromal, file = "2_output/tt_stromal.csv")
+
+```
