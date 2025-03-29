@@ -3,7 +3,6 @@ title: "Bulk Sequencing Analysis - Negative Control"
 output: html_document
 ---
 
--   Output in: archive\\blacklab\\KieranRedpath\\RNAseqHuman2\\analysis\\output
 # Setup and QC
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = FALSE, message = FALSE, warning = FALSE)
@@ -60,7 +59,7 @@ pref.round <- function(x) {
 
 ### Process counts data
 ```{r}
-# # Load data (this file is not currently on the compute server, so the processed copy of fcData is provided instead as a .RDS file at the end of this chunk)
+# # Load data (this file is not currently in the project, so the processed copy of fcData is provided instead as a .RDS file at the end of this chunk)
 # # fcData <- read.table("../counts/human-counts.txt", header=TRUE)
 # 
 # # Inspect data
@@ -304,8 +303,7 @@ fit <- lmFit(v, design) %>% eBayes(.)
 # Create a single toptable, as the only  comparison is all 3 DMSO samples vs all 3 Das samples
 tt <- topTable(fit, coef = 2, n = nrow(counts))
 
-# Identify which group has higher expression by comparing counts and trt at some point
-# Limma uses alphabetical order: the genes with a positive logFC are more expressed in the group that is later alphabetically (I think? but you might not have coded it so that works, since the design matrix is just binary, in which case Das samples come second)
+# Limma uses alphabetical order: the genes with a positive logFC are more expressed in the group that is later alphabetically.
 ```
 
 # Annotate tt and create filtered copies for downstream analyses
@@ -326,8 +324,6 @@ tt$Symbol <- GeneKey$SYMBOL[match(rownames(tt), GeneKey$ENSEMBL)]
 # Tidy up the environment
 rm(list = c("GeneKey"))
 
-# Define significance by adj p-value and significant fold change (log2(4)=2, so 2x logFC or 4x FC) for reactome enrichment, and also just on p-value
-# Messing around with some of these filters so that half to 3/4 of the genome isn't DE is probably a good idea
 # This is used for GOSEQ reactome analysis:
 ttsigFC <- filter(tt, tt$adj.P.Val < 0.2 & abs(tt$logFC) >= 1)
 # Filter genes for significance - see what happens if you put in a threshold of 0.1:
@@ -345,8 +341,6 @@ ttsigwall <- filter(tt, tt$adj.P.Val < 0.2)
 # Assign significance to genes from toptables
 # Only on p-value
 genes <- ifelse(tt$adj.P.Val < 0.2, 1, 0)
-# On p-value and logFC - is this potentially biased, in that I'm putting significant genes that are only slightly differentially expressed in the non-significant group, causing disruption? Could duplicate tt and cut out low FC genes to solve this
-#genes <- ifelse(tt$adj.P.Val < 0.05 & abs(tt$logFC) >= 2, 1, 0)
 names(genes) <- rownames(tt)
 print(table(genes))
 
@@ -356,8 +350,6 @@ GO.wall <- goseq(pwf, genome="hg19", id="ensGene")
 # Adjust p-values
 GO.wall$padj <- p.adjust(GO.wall$over_represented_pvalue, method="fdr")
 GO.wall <- filter(GO.wall, GO.wall$padj < 0.05)
-
-# Carry out this analysis again,but using the hypergeometric method (i.e. no length-correction). If there isn't too much difference, this can be validation for using GSEA instead of DE to identify enriched processes.
 
 # goseq processing for GO terms
 pwf <- nullp(genes, genome="hg19", id="ensGene")
@@ -374,10 +366,6 @@ venn(list(Wallenius = GO.wall$term, Hypergeometric = GO.hyper$term))
 
 # Check size of GO terms
 sort(GO.wall$numInCat, decreasing=TRUE) %>% barplot(., ylab="Total genes in reactome pathway")
-
-# Filter to remove very large GO terms - Over 100 genes in category, but doesn't seem to provide anything useful after light testing
-# GO.test <- GO.wall[[2]]
-# GO.testx <- filter(GO.test, GO.test$numInCat < 200)
 ```
 
 # Reactome Pathway Analysis with ReactomePA and goseq
@@ -406,14 +394,6 @@ ttsigwallGenesEntrez <- AnnotationDbi::select(hs,
                                               keys = as.character(na.omit(rownames(ttsigwall))),
                                               columns = "ENTREZID",
                                               keytype = "ENSEMBL")
-
-# Instead do this defining significance with fold change and p value
-# ttsigwallGenesEntrez <- AnnotationDbi::select(hs, 
-#                                               keys = as.character(na.omit(rownames(ttsigFC))),
-#                                               columns = "ENTREZID",
-#                                               keytype = "ENSEMBL")
-
-
 
 # Define which of your genes are in the reactome database 
 allGenes <- intersect( ttGenesEntrez$ENTREZID, unique(unlist(rGenesPath)) )
@@ -602,256 +582,4 @@ fgsea.gsea.table.parent <- fgsea.gsea.table %>% dplyr::filter(`Reactome Pathway 
 
 # Tidy up the environment
 rm(list = c("keep", "x", "symbol", "entrez"))
-```
-
-
-# Gene-set Enrichment Analysis with GO terms and clusterProfiler
-
-* Find enriched GO terms using GSEA, and filter them by size
-* Create heatmaps to plot GO terms determined by GSEA based on similarity in gene composition - for each of the comparisons. These are saved in: archive\\blacklab\\KieranRedpath\\RNAseqHuman2\\analysis\\output
-```{r}
-# Run GO term GSE analysis, only finding gene sets with less than 100 genes in them
-GO.gsea <- gseGO(ttsigGenesEntrezGSEA, OrgDb = hs, ont = "ALL", keyType = "ENTREZID", maxGSSize = 300)
-
-# Create a copy of the original object for plotting with after you mess around with the original for readability
-GO.gsea.copy <- GO.gsea
-GO.gsea@result$order = 1:nrow(GO.gsea@result)
-
-# Simplify to remove some redundancy in GO terms (as they're tiered) - you could use this more later on
-GO.gsea.simple <- simplify(GO.gsea.copy)
-# emapplot(simple)
-# Create Group object for heatmaps to plot pathways determined by GSEA based on similarity in composition
-Group <- GO.gsea@result
-
-# Replace ENTREZ ID's with gene symbols for readability in the result table
-for(i in 1:nrow(GO.gsea)){
-  spliti <- strsplit(GO.gsea@result$core_enrichment, split = "/")
-  unspliti <- AnnotationDbi::select(hs,
-                                    keys = as.character(spliti[[i]]),
-                                    columns = "SYMBOL",
-                                    keytype = "ENTREZID")
-  unspliti <- unspliti[,2]
-  unspliti <- paste(unspliti, collapse = "::")
-  
-  GO.gsea@result$core_enrichment[i] <- unspliti
-}
-
-# Create a fun little plot
-ridgeplot(GO.gsea.copy) + labs(x = "enrichment distribution")
-# # Try and create another fun little plot
-clusterProfiler::emapplot(GO.gsea.copy, showCategory = 10)
-# This just crashes
-clusterProfiler::goplot(GO.gsea.copy, showCategory = 10)
-plotGOgraph(GO.gsea.copy)
-
-# Extract every gene that maps to each significant GO term, using the simplified list of GO terms
-genesinSets <- mget(rownames(GO.gsea.simple@result),org.Hs.egGO2ALLEGS)
-names(genesinSets) <- GO.gsea.simple@result$Description
-
-# Intersections and heatmaps
-ensginSigSets <- genesinSets
-
-SetGeneInt <- matrix(data = 0, nrow = length(ensginSigSets), ncol = length(ensginSigSets))
-rownames(SetGeneInt) <- colnames(SetGeneInt) <- gsub("Homo sapiens\\: ", "", names(ensginSigSets))
-for(i in 1:length(ensginSigSets)){
-  for(j in 1:length(ensginSigSets)){
-    Seti <- ensginSigSets[[i]]
-    Setj <- ensginSigSets[[j]]
-    SetGeneInt[i,j] <- length(intersect(Seti, Setj)) / length(Seti)
-  }
-}
-
-# Remove rows and columns with NA's
-SetGeneInt <- na.omit(SetGeneInt)
-
-cols <- colorRampPalette(c("white", "red"))(n = 50)
-ord <- as.dendrogram(hclust(dist(SetGeneInt)))
-png(paste0("00_output/GO_Term_Gene_Set_Overlap.png"), width = 3000, height = 3000)
-par(cex.main = 5, cex.lab = 3.5, cex.axis = 3.5)
-heatmap.2(SetGeneInt, scale = 'none', trace = 'none', col = cols, key = TRUE,
-          keysize = 1.4, density.info = "none", mar = c(75,75), cexRow = 1, cexCol = 1, cex.main = 10,
-          dendrogram = 'row',
-          main = "GO Term Overlap in Genes",
-          Rowv = ord, Colv = ord)
-dev.off()
-```
-
-# Over-representation Analysis with Reactome Pathways and goseq
-
-* Identify enriched Reactome pathways with the goseq package, with significant genes as adj. p-value \< 0.05, and Wallenius method gene length correction
-* Carry out the same analysis but with the hypergeometric method
-```{r, include = FALSE}
-# goseq processing, where gene2cat is an object mapping gene names to Reactome pathway terms
-pwfReactome <- nullp(plotGenes, 'hg19', id = "knownGene")
-Reactome.wall <- goseq(pwfReactome, gene2cat = rGeneByPathFinal)
-Reactome.wall$padj <- p.adjust(Reactome.wall$over_represented_pvalue, method = "fdr")
-
-# Add pathway information, make it more readable, and round values
-Reactome.wall$Pathway <- gsub("Homo sapiens: ", "", rPathName[match(Reactome.wall$category, names(rPathName))])
-Reactome.wall[,2:6] <- round(as.numeric(unlist(Reactome.wall[,2:6])), digits=4)
-
-# Filter for significance (adj p-value < 0.05)
-# Reactome.wall <- filter(Reactome.wall, Reactome.wall$padj < 0.05)
-# Or with FDR adjust threshold 0.1 or 0.2...
-# Reactome.wall <- filter(Reactome.wall, Reactome.wall$padj < 0.2)
-
-# Add a column containing all of the genes in a reactome pathway
-
-# Carry out this analysis again,but using the hypergeometric method (i.e. no length-correction). If there isn't too much difference, this can be validation for using GSEA instead of DE to identify enriched processes.
-# goseq processing, where gene2cat is an object mapping gene names to Reactome pathway terms
-pwfReactome <- nullp(plotGenes, 'hg19', id = "knownGene")
-Reactome.hyper <- goseq(pwfReactome, gene2cat = rGeneByPathFinal, method = "Hypergeometric")
-Reactome.hyper$padj <- p.adjust(Reactome.hyper$over_represented_pvalue, method = "fdr")
-
-# Add pathway information, make it more readable, and round values
-Reactome.hyper$Pathway <- gsub("Homo sapiens: ", "", rPathName[match(Reactome.hyper$category, names(rPathName))])
-Reactome.hyper[,2:6] <- round(as.numeric(unlist(Reactome.hyper[,2:6])), digits=4)
-
-# Filter for significance (adj p-value < 0.05)
-Reactome.hyper <- filter(Reactome.hyper, Reactome.hyper$padj < 0.05)
-```
-
-* Add a column to reactome.wall containing all DE genes in cat 
-```{r}
-# Create a tool for gene labels
-GeneLabelTool <- dplyr::pull(tt, Symbol)
-GeneLabelTool <- AnnotationDbi::select(hs,
-                                       keys = GeneLabelTool,
-                                       columns = c("ENSEMBL", "ENTREZID", "SYMBOL"),
-                                       keytype = "SYMBOL")
-
-# Creates a list of significant genes for each goseq pathway, converts them to symbol ID's. Also does the same for all the genes in each pathway and adds the information to "Reactome.wall".
-SiggenesinPaths <-list()
-for(i in 1:nrow(Reactome.wall)){
-  SiggenesinPaths[[i]] <- rGenesPath[match(Reactome.wall$category[i], names(rGenesPath))] %>% 
-    .[[1]] %>% 
-    intersect(., rownames(pwfReactome)[pwfReactome$DEgenes==1])
-}
-
-genesinPaths <- list()
-for(i in 1:nrow(Reactome.wall)){
-  genesinPaths[[i]] <- rGenesPath[match(Reactome.wall$category[i], names(rGenesPath))] %>% 
-    .[[1]] %>% 
-    intersect(., rownames(pwfReactome)[pwfReactome$DEgenes==1 | pwfReactome$DEgenes==0])
-}
-SigsymbolsinPaths <- lapply(SiggenesinPaths, function(x) GeneLabelTool$SYMBOL[na.omit(match(x, GeneLabelTool$ENTREZID))] )
-symbolsinPaths <- lapply(genesinPaths, function(x) GeneLabelTool$SYMBOL[na.omit(match(x, GeneLabelTool$ENTREZID))] )
-
-# Save the object that's loaded in to calculate metagenes.
-ensginPaths <- lapply(genesinPaths, function(x) GeneLabelTool$ENSEMBL[na.omit(match(x, GeneLabelTool$ENTREZID))] )
-# saveRDS(ensginPaths, file = "00_output/Ensembl_ID_in_Paths.Rds")
-
-# Attach a string of significant genes and a string of all genes in each reactome pathway to that pathway
-SiggenesStick <- lapply(SigsymbolsinPaths, function(x) paste0(x, collapse="::", sep="")) %>% unlist()
-Reactome.wall$DEgenesInCat <- SiggenesStick
-genesStick <- lapply(symbolsinPaths, function(x) paste0(x, collapse="::", sep="")) %>% unlist()
-Reactome.wall$genesInCat <- genesStick
-
-# Alter various names in the data.frame for readability. Can remove this if you need to
-# Reactome.wall <- lapply(Reactome.wall, gsub, pattern='/', replacement=' ') %>% as.data.frame()
-# Reactome.wall$Pathway <- lapply(Reactome.wall$Pathway, gsub, pattern=':', replacement='-')
-
-# Fix class of Reactome.wall$numInCat so it can be filtered on
-Reactome.wall$numInCat <- as.numeric(Reactome.wall$numInCat)
-# Filter out a bunch of pathways with higher p values
-Reactome.wall <- filter(Reactome.wall, Reactome.wall$padj < 0.2)
-```
-
-*  Compare the number of significantly enriched small pathways
-```{r}
-# Compare the number of significantly enriched pathways with or without length-correction
-venn(list(Wallenius = Reactome.wall$Pathway, Hypergeometric = Reactome.hyper$Pathway))
-
-# Check size of reactome pathways
-sort(Reactome.wall$numInCat, decreasing=TRUE) %>% barplot(., ylab="Total genes in reactome pathway")
-
-# Filter to remove very large Reactome pathways
-Reactome.wall.small <- Reactome.wall
-Reactome.wall.small <- filter(Reactome.wall.small, Reactome.wall.small$numInCat < 100)
-
-# Create heatmaps to plot pathways based on similarity in composition
-
-Group <- Reactome.wall.small
-genesinPaths <- list()
-for(i in 1:nrow(Group)){
-  genesinPaths[[i]] <- rGenesPath[match(Group$category[i], names(rGenesPath))] %>% .[[1]]
-  
-}
-names(genesinPaths) <- Group$Pathway
-
-# Intersections and heatmaps
-ensginSigPaths <- genesinPaths
-
-PathGeneInt <- matrix(data = 0, nrow = length(ensginSigPaths), ncol = length(ensginSigPaths))
-rownames(PathGeneInt) <- colnames(PathGeneInt) <- names(ensginSigPaths)
-rownames(PathGeneInt) <- colnames(PathGeneInt) <- gsub("Homo sapiens\\r: ", "", names(ensginSigPaths))
-for(i in 1:length(ensginSigPaths)){
-  for(j in 1:length(ensginSigPaths)){
-    Pathi <- ensginSigPaths[[i]]
-    Pathj <- ensginSigPaths[[j]]
-    PathGeneInt[i,j] <- length(intersect(Pathi, Pathj)) / length(Pathi)
-  }
-}
-
-cols <- colorRampPalette(c("white", "red"))(n = 50)
-ord <- as.dendrogram(hclust(dist(PathGeneInt)))
-png(paste0("00_output/Small_Reactome_Pathway_Overlap.png"), width = 3000, height = 3000)
-par(cex.main = 5, cex.lab = 3.5, cex.axis = 3.5)
-heatmap.2(PathGeneInt, scale = 'none', trace = 'none', col = cols, key = TRUE,
-          keysize = 1.4, density.info = "none", mar = c(75,75), cexRow = 1, cexCol = 1, cex.main = 10,
-          dendrogram = 'row',
-          main = "Small Reactome Pathway Overlap in Genes", 
-          Rowv = ord, Colv = ord)
-dev.off()
-```
-
-* Create a heatmap to plot pathways determined by pathway enrichment based on similarity in gene composition. These are saved in: archive\\blacklab\\KieranRedpath\\RNAseqHuman2\\analysis\\output
-```{r}
-# Create heatmaps to plot pathways based on similarity in composition
-
-Group <- Reactome.wall
-genesinPaths <- list()
-for(i in 1:nrow(Group)){
-  genesinPaths[[i]] <- rGenesPath[match(Group$category[i], names(rGenesPath))] %>% .[[1]]
-  
-}
-names(genesinPaths) <- Group$Pathway
-
-# Intersections and heatmaps
-ensginSigPaths <- genesinPaths
-
-PathGeneInt <- matrix(data = 0, nrow = length(ensginSigPaths), ncol = length(ensginSigPaths))
-rownames(PathGeneInt) <- colnames(PathGeneInt) <- names(ensginSigPaths)
-rownames(PathGeneInt) <- colnames(PathGeneInt) <- gsub("Homo sapiens\\r: ", "", names(ensginSigPaths))
-for(i in 1:length(ensginSigPaths)){
-  for(j in 1:length(ensginSigPaths)){
-    Pathi <- ensginSigPaths[[i]]
-    Pathj <- ensginSigPaths[[j]]
-    PathGeneInt[i,j] <- length(intersect(Pathi, Pathj)) / length(Pathi)
-  }
-}
-
-cols <- colorRampPalette(c("white", "red"))(n = 50)
-ord <- as.dendrogram(hclust(dist(PathGeneInt)))
-# png(paste0("00_output/Pathway_Overlap.png"), width = 3000, height = 3000)
-# par(cex.main = 5, cex.lab = 3.5, cex.axis = 3.5)
-# heatmap.2(PathGeneInt, scale = 'none', trace = 'none', col = cols, key = TRUE,
-#           keysize = 1.4, density.info = "none", mar = c(75,75), cexRow = 1, cexCol = 1, cex.main = 10,
-#           dendrogram = 'row',
-#           main = "Reactome Pathway Overlap in Genes", 
-#           Rowv = ord, Colv = ord)
-# dev.off()
-```
-
-# Compare ReactomePA and goseq Hypergeometric Over-represenation Analysis Results
-*  Compare the overlap in pathways between ReactomePA and goseq hypergeometric pathway enrichment
-```{r}
-# Compare pathway output from reactomePA (hypergeometric) and goseq(hypergeometric)
-# Pull out just the useful dataframes from RPA.hyper, so that it matches RPA.goseq
-
-RPA.hyper2 <- RPA.hyper@result
-names(RPA.hyper2)[2] <- "Pathway"
-RPA.hyper2 <- RPA.hyper2 %>% filter(p.adjust < 0.05)
-
-venn(list(RPA.hyper = RPA.hyper2$Pathway, Reactome.hyper = Reactome.hyper$Pathway))
 ```

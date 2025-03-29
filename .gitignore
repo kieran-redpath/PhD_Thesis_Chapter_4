@@ -7,10 +7,7 @@
 *.RDataTmp
 
 # R files that are too big to be uploaded
-*.RDS
-
-# Bulk data for mouse reads (for now)
-scDrugMice2023/
+scDrugMiceDas_annotated.RDS
 
 # User-specific files
 *.Ruserdata

@@ -1,7 +1,7 @@
 ---
-title: "2_sc-seq_dasatinib_subclustering"
+title: "Subclustering Epithelial Cells"
 author: "Kieran Redpath"
-date: "2024-01-19"
+date: "29/03/2025"
 output: html_document
 ---
 
@@ -40,8 +40,6 @@ library(limma)
 library(edgeR)
 library(DESeq2)
 library(patchwork)
-# IF YOU HAVE PROBLEMS WITH ANYTHING AND/OR WANT TO UPDATE SEURAT, BE AWARE OF THIS!!!
-# https://satijalab.org/seurat/articles/announcements#changes-in-seurat-v5
 library(ggpubr)
 # For identifying doublets in data
 library(DoubletFinder)
@@ -89,12 +87,7 @@ pref.round <- function(x) {
 
 ### Load pre-processed das data
 ```{r}
-das.dat <- readRDS("~/R/sc-seq_mouse/2_output/das_dat_processed.RDS")
-```
-
-### Load all data from Conor
-```{r}
-# CV.all.dat <- readRDS("~/R/sc-seq_mouse/data/CV_mice_dat_annotated.RDS")
+das.dat <- readRDS("~/R/PhD_Thesis_Chapter_4/2_output/das_dat_processed.RDS")
 ```
 
 ### Subset data into only epithelial cells for subclustering
@@ -124,8 +117,6 @@ rm(cdh1.expression)
 # Seurat on Epithelial Cells
 ### Carry out the Seurat workflow on only these cells to create new, higher resolution clusters
 ```{r}
-# Found notes online indicating to re-run everything except NormalizeData, as the data is already normalised (in the "data" element of the SeuratObject)
-# das.dat.epithelial <- NormalizeData(object = das.dat.epithelial)
 # Same parameters as larger dataset
 das.dat.epithelial <- FindVariableFeatures(object = das.dat.epithelial, selection.method = "vst", nfeatures = 2000)
 # Same parameters
@@ -196,9 +187,6 @@ for(i in 1:length(das.markers.epithelial.list)){
 das.markers.epithelial.top5.list <- lapply(das.markers.epithelial.list, function(df) head(df, 5))
 # Use do.call to combine the list of data frames into a single data frame
 das.markers.epithelial.top5.data.frame <- do.call(rbind, das.markers.epithelial.top5.list)
-# If you want to reset row names in the combined data frame
-# rownames(combined_data) <- NULL
-# Now 'das.markers.epithelial.top5.data.frame' contains the first 5 rows of each data frame
 
 # Export cluster markers for thesis
 wb <- createWorkbook()
@@ -301,18 +289,6 @@ VlnPlot(das.dat.epithelial, features = c("Itgb1", "Itgb2", "Itgb3"))
 # Some other interesting integrin subunits
 VlnPlot(das.dat.epithelial, features = c("Itgav", "Itga5", "Itgb6"))
 
-
-# Developing a theory
-# Clusters 3 and 4 are very similar, definitely progenitor cells. However, cluster 4 has some quite different gene expression. This may be because it's going through the cell cycle (it expresses many of Dong et al 2023's markers for this, Top2a and Mki67), but it could also be developing early cancer.
-# Foxm1 stimulates progression through the cell cycle (Takada et al. 2023), but also may have a role in EMT in GC (Miao et al. 2014), upregulating Zeb1, Zeb2, Vim, and down-regulating Cdh1. There's some evidence that Foxm1 is involved in epithelial progenitor expansion leading to cancer (Gemenetzidis et al. 2011)
-# Same paper also suggest Foxm1 down = NF-κB p65 subunit, cyclin D1, Hes-1, VEGF, and EpCAM protein down.
-# Nothing is going on in the hedgehog pathway (Shh, Ihh, Hh), despite some of the literature around this.
-# Twist1 isn't strongly expressed anywhere, despite some evidence that it upregulates Foxm1 in GC https://journals.plos.org/plosone/article?id=10.1371/journal.pone.0077625
-# Some evidence that Foxm1 upregulates Ctsd, which then downregulates Cdh1, but there's no Ctsd expression in cluster 4 here https://pubmed.ncbi.nlm.nih.gov/28978107/
-# CLuster 4 also expresses high amounts of Top2a and Mki67 compared to other cells
-# In our data, Zeb1 and Zeb2 are pretty unclear, but there's definitely more vimentin. Vimentin is the major cytoskeletal component of mesenchymal cells, but also is just in mitosis?
-
-
 # EMT:
 VlnPlot(das.dat.epithelial, features = c("Foxm1", "Cdh1", "Zeb1", "Zeb2", "Vim"))
 # These are markers of EMT from google: negative (Cdh1 and cytokeratins) and positive (vimentin, N-cadherin (Cdh2), fibronectin), plotted alongside Foxm1 for comparison.
@@ -340,10 +316,8 @@ VlnPlot(das.dat.epithelial, features = c("Foxm1", "Cdh1", "Vim"))
 # DDR2 activity and EMT, from Nic's Das paper https://www.ncbi.nlm.nih.gov/pmc/articles/PMC8996982/
 VlnPlot(das.dat.epithelial, features = c("Ddr1", "Ddr2"), split.by = "treat.ident")
 
-
 # Other things we might expect to be different based on what we know of Dasatinib
 VlnPlot(das.dat.epithelial, features = c("Pik3r1", "Src", "Akt1", "Akt2"), split.by = "treat.ident")
-
 
 # Runx2 information from https://www.frontiersin.org/journals/oncology/articles/10.3389/fonc.2023.1133476/full
 # More here https://www.mdpi.com/1422-0067/24/8/7001
@@ -351,7 +325,6 @@ VlnPlot(das.dat.epithelial, features = c("Pik3r1", "Src", "Akt1", "Akt2"), split
 # RUNX2 has been shown to promote malignant progression in gastric cancer by regulating COL1A1, YAP1 and FN1 expression.
 # RUNX2 activates the transcription of MGAT5 and MMP13
 VlnPlot(das.dat.epithelial, features = c("Runx2", "Col1a1", "Yap1", "Fn1", "Mgat5", "Mmp13"))
-
 
 # Sox2 interactions and other stem cell markers (Also Oct3/4 but missing from the data):
 VlnPlot(das.dat.epithelial, features = c("Sox2", "Lif", "Nanog", "Pax6", "Npm1"))
@@ -361,7 +334,6 @@ VlnPlot(das.dat.epithelial, features = c("Ctnnb1"), split.by = "treat.ident")
 # Sst: somatostatin, D cells;  Gast: gastrin, G cells; Ghrl: ghrelin, X cells; Dclk1: Doublecortin-like kinase, tuft cells
 # Also Chga, enteroendocrine cells - but these should have mostly been found in 2_sc-seq_dasatinib
 VlnPlot(das.dat.epithelial, features = c("Sst", "Gast", "Ghrl", "Dclk1", "Chga"))
-
 
 # Reset the active idents (just in case)
 Idents(das.dat.epithelial) <- das.dat.epithelial@meta.data[["seurat_clusters"]]
@@ -449,7 +421,6 @@ VlnPlot(das.dat.epithelial, features = c("Fgf10", "Fgf18"))
 # Yap1 looks up in das treated cancer, which flows in to a lot of the potential targets we've been looking at
 VlnPlot(das.dat.epithelial, features = c("Yap1"), split.by = "treat.ident")
 VlnPlot(das.dat.epithelial, features = c("Notum"), split.by = "treat.ident")
-# After talking to Sefi Rosenbluh at genemappers, look at some genes related to the Yap/Hippo and b-Cat/Wnt pathways
 # Ccn1 (Cyr61) and Ccn2 (Ctgf) for Yap/Hippo, #Axin2 for Wnt
 VlnPlot(das.dat.epithelial, features = c("Ccn1", "Ccn2", "Axin2"), split.by = "treat.ident")
 # Genes in APC complex that work with Axin2 in B-catenin signalling
@@ -459,19 +430,16 @@ VlnPlot(das.dat.epithelial, features = c("Apc"), split.by = "samp.ident.plain")
 # Look at Gsk3b, Yes1, and Yap1 for related reasons
 VlnPlot(das.dat.epithelial, features = c("Gsk3b", "Yes1", "Yap1"), split.by = "treat.ident")
 # Yes1, Src, and Abl all phosphorylate Yap1
-# From Sefi's paper b-Catenin-Driven Cancers Require a YAP1 Transcriptional Complex for Survival and Tumorigenesis
 
 # Checking entire Ccn family as Ccn1 and Ccn3 should be up in gastric cancer https://pubmed.ncbi.nlm.nih.gov/27633176/
 VlnPlot(das.dat.epithelial, features = c("Ccn1", "Ccn2", "Ccn3"), split.by = "treat.ident")
 VlnPlot(das.dat.epithelial, features = c("Ccn4", "Ccn5", "Ccn6"), split.by = "treat.ident")
 # Looks like we only pick up Ccn1 and Ccn2 though
 
-
-# Genes from Chella and her paper
-VlnPlot(das.dat.epithelial, features = c("Cd44", "Sfrp2", "Thy1", "Thbs4", "Il1r1"), split.by = "treat.ident") + plot_annotation(title = "Chella genes")
-VlnPlot(das.dat.epithelial, features = c("Cxcl14", "Il1r2", "Oasl1", "Fgf8", "Adm", "Hpgd", "Apoa4", "Mef2c"), split.by = "treat.ident") + plot_annotation(title = "Chella genes up in SRCC vs poorly differentiated")
-VlnPlot(das.dat.epithelial, features = c("Ceacam3", "Ceacam6"), split.by = "treat.ident") + plot_annotation(title = "Chella genes up in poorly differentiated vs SRCC")
-
+# Genes from a paper
+VlnPlot(das.dat.epithelial, features = c("Cd44", "Sfrp2", "Thy1", "Thbs4", "Il1r1"), split.by = "treat.ident") + plot_annotation(title = "paper genes")
+VlnPlot(das.dat.epithelial, features = c("Cxcl14", "Il1r2", "Oasl1", "Fgf8", "Adm", "Hpgd", "Apoa4", "Mef2c"), split.by = "treat.ident") + plot_annotation(title = "paper genes up in SRCC vs poorly differentiated")
+VlnPlot(das.dat.epithelial, features = c("Ceacam3", "Ceacam6"), split.by = "treat.ident") + plot_annotation(title = "paper genes up in poorly differentiated vs SRCC")
 
 # Compare between the two treatments:
 Idents(das.dat.epithelial) <- das.dat.epithelial@meta.data$treat.ident
@@ -489,7 +457,6 @@ VlnPlot(das.dat.epithelial, features = c("Oas1a", "Oas1g", "Oas2", "Oasl2", "Oas
 VlnPlot(das.dat.epithelial, features = c("Ifng", "Ifngr1", "Tlr2", "Tlr4"))
 # Doesn't look like it at least
 # What about interferon alpha or gamma?
-
 
 # Are these being driven by any one particular mouse?
 # Set idents back to cell type
@@ -533,7 +500,6 @@ VlnPlot(das.dat.epithelial, features = pit.features) + plot_annotation(title = "
 parietal.features <- c("Atp4a", "Atp4b", "Ckb", "Idh2")
 VlnPlot(das.dat.epithelial, features = parietal.features) + plot_annotation(title = "Parietal Cell Markers")
 
-
 # Misc stuff
 FeaturePlot(das.dat.epithelial, features = c("Runx1", "Runx2", "Runx3"), split.by = "treat.ident")
 VlnPlot(das.dat.epithelial, features = c("Runx1", "Runx2"))
@@ -571,7 +537,6 @@ VlnPlot(das.dat, features = c("Nfkb1", "Icam1", "F11r", "Tjp1", "Tnf", "Ptprc"),
 VlnPlot(das.dat.epithelial, features = c("Nfkb1", "Icam1", "F11r", "Tjp1", "Tnf", "Ptprc"), split.by = "treat.ident") + plot_annotation(title = "More inflammation and similar markers (that are interesting)")
 # Notes on these - F11r is a tight junction protein. https://www.ncbi.nlm.nih.gov/gene/50848 As is Tjp1
 
-
 # Claudins:
 # Cldn18 is a potential drug target in GS TCGA gastric cancer subtype. It's high in proliferating cells 1, but not higher than in other clusters. Doesn't show much cross treatment difference, only in undetermined (very few cells) and maybe pit cells.
 VlnPlot(das.dat.epithelial, features = "Cldn18", split.by = "treat.ident")
@@ -583,7 +548,6 @@ VlnPlot(das.dat.epithelial, features = c("Cldn2", "Cldn3", "Cldn4"), split.by = 
 VlnPlot(das.dat.epithelial, features = c("Cldn7", "Cldn8", "Cldn12"), split.by = "treat.ident")
 VlnPlot(das.dat.epithelial, features = c("Cldn18", "Cldn23"), split.by = "treat.ident")
 
-
 # Gastric stem cell markers https://www.gastrojournal.org/article/S0016-5085(21)04088-9/fulltext
 # This paper also has a much more thorough list in Table 1, looks like a lot of genes that you've already looked at though
 VlnPlot(das.dat.epithelial, features = c("Lgr5", "Axin2", "Aqp5")) + plot_annotation(title = "Gastric Stem Cell Markers (not final)")
@@ -594,51 +558,6 @@ VlnPlot(das.dat.epithelial, features = c("Cckbr")) + plot_annotation(title = "Ga
 VlnPlot(das.dat.epithelial, features = c("Bmi1", "Bhlha15")) + plot_annotation(title = "Antral Isthmus Stem Cell Markers (not final)")
 
 rm(list = c("interesting.features", "chief.features", "mucous.features", "pit.features", "parietal.features"))
-```
-
-### Plots with median lines and Sefi's genes by Cdh1 expression, as well as some misc stuff
-```{r}
-# Ensure active idents are correct
-Idents(das.dat.epithelial) <- das.dat.epithelial@meta.data[["seurat_clusters"]]
-
-# Code that adds a line at the median for violin
-VlnPlot(das.dat.epithelial, features = c("Cdh1"), split.by = "treat.ident") + stat_summary(fun = median, geom = "crossbar", 
-                                                                                           position = position_dodge(width = 0.9), 
-                                                                                           width = 0.25, color = "black", linewidth = 0.5)
-
-# Look at the expression of Wnt/B-catenin related genes by Cdh1 expression level
-Idents(das.dat.epithelial) <- das.dat.epithelial@meta.data[["cdh1.expression"]]
-
-# Sefi genes by treat identity
-VlnPlot(das.dat.epithelial, features = c("Ccn1", "Ccn2", "Axin2"), split.by = "treat.ident") + stat_summary(fun = median, geom = "crossbar", 
-                                                                                                            position = position_dodge(width = 0.9), 
-                                                                                                            width = 0.25, color = "black", linewidth = 0.5)
-
-# Sefi genes just by Cdh1 expression
-VlnPlot(das.dat.epithelial, features = c("Ccn1", "Ccn2", "Axin2")) + stat_summary(fun = median, geom = "crossbar", 
-                                                                                  position = position_dodge(width = 0.9), 
-                                                                                  width = 0.25, color = "black", linewidth = 0.5)
-
-
-### Misc Stuff
-Idents(das.dat.epithelial) <- das.dat.epithelial@meta.data[["type.manual.v1"]]
-# EMT:
-VlnPlot(das.dat.epithelial, features = c("Foxm1", "Cdh1", "Cdh2", "Zeb1", "Zeb2", "Vim"))
-# These are markers of EMT from google: negative (Cdh1 and cytokeratins) and positive (vimentin, N-cadherin (Cdh2), fibronectin), plotted alongside Foxm1 for comparison.
-
-
-
-# Interesting features/cancer stem cell markers/cancer markers but split up a bit so they aren't impossible to read
-VlnPlot(das.dat.epithelial, features = c("Lama3", "Lamb2", "Itga2", "Itga3"), split.by = "treat.ident")
-VlnPlot(das.dat.epithelial, features = c( "Lrig1", "Foxm1", "Sox2", "Clu", "Ptk2"))
-VlnPlot(das.dat.epithelial, features = c( "Prom1", "Icam1", "Epcam", "Aldh1a1", "Aldh1a3", "Klf4"))
-# HDGC genes from https://aacrjournals.org/cancerpreventionresearch/article-abstract/17/8/361/746638/Stool-Protein-Mass-Spectrometry-Identifies (identified because ltf is near the top of the list in our dataset)
-VlnPlot(das.dat.epithelial, features = c("Ltf", "Tpm2", "Dpp4", "Vcp", "Asah2", "Pip"))
-VlnPlot(das.dat.epithelial, features = c("Gli1", "Hsp90ab1", "Lefty1"))
-VlnPlot(das.dat.epithelial, features = c("Ptk2"), split.by = "treat.ident")
-
-# Reset active idents
-Idents(das.dat.epithelial) <- das.dat.epithelial@meta.data[["seurat_clusters"]]
 ```
 
 # Create cell type annotations for further analysis
@@ -710,7 +629,6 @@ das.dat.epithelial.list[["Das - drug"]]@assays[["RNA"]]@data %>% dim()
 # 450 drugged cells
 
 # Make objects of treatments per cell
-# IS THIS TREATMENT PER CELL? looks like it's just the ID for the treatment type repeated, without any actual info on which cell is which
 das.epi.control.treat <- das.dat.epithelial.list[["Das - control"]]@meta.data[["treat.ident"]]
 das.epi.dasatinib.treat <- das.dat.epithelial.list[["Das - drug"]]@meta.data[["treat.ident"]]
 
@@ -748,7 +666,7 @@ for(x in levels(das.dat.epithelial@meta.data[["type.manual.v1"]])){
   design.x %>% head()
   design.x %>% tail()
   # Fit linear model
-  # voom plot to see what it looks like - pretty weird, but you don't actually use the voom output here since allegedly it's already normalised
+  # voom plot to see what it looks like
   print(voom(das.epi.combined.x, plot = TRUE))
   fit.x <- lmFit(as.matrix(das.epi.combined.x), design.x)
   fit.x <- eBayes(fit.x)
@@ -783,18 +701,11 @@ for(x in levels(das.dat.epithelial@meta.data[["type.manual.v1"]])){
   # Convert ranks.x to the right format (named t stats) for analysis
   ranks.x.v2 <- ranks.x$t
   names(ranks.x.v2) <- ranks.x$rn
-  # Remove duplicates
-  # ranks.x.v2 <- ranks.x.v2[!duplicated(names(ranks.x.v2))]
   # Test for significant pathway over-representation
   # Save into the gsea.epithelial.limma object
   gsea.epithelial.limma[[x]] <- fgsea(gsea.reactome.x, ranks.x.v2, maxSize = 500, minSize = 20) %>% .[order(padj),] %>% .[.$padj < 0.05,]
-  # names(gsea.epithelial.limma)[x] <- names(tt.epithelial.limma)[x]
-  # To make a version without filtering on gene set maximum and minimum sizes
-  # gsea.epithelial.limma[[x]] <- fgsea(gsea.reactome.x, ranks.x.v2) %>% .[order(padj),] %>% .[.$padj < 0.05,]
-  
   # Create a list of pathways with children collapsed
   gsea.epithelial.limma.collapsed[[x]] <- collapsePathways(gsea.epithelial.limma[[x]], gsea.reactome.x, stats = ranks.x.v2)
-  # names(gsea.epithelial.limma.collapsed)[x] <- names(tt.epithelial.limma)[x]
 }
 
 for(x in levels(das.dat.epithelial@meta.data[["type.manual.v1"]])){
@@ -909,8 +820,6 @@ gsea.epithelial.limma.pseudo.collapsed <- list()
 
 # Identify differentially expressed genes and run GSEA
 for(y in names(cts.final)){
-  # # Filter out genes that fail to show at least 1 read per million
-  # keep.y <- rowSums(edgeR::cpm(cts.final[[y]])>1) >= 1
   # Filter out genes that fail to show at least 1 read
   keep.y <- rowSums(cts.final[[y]]>1) >= 1
   print(table(keep.y))
@@ -954,13 +863,9 @@ for(y in names(tt.epithelial.limma.pseudo)){
   # Convert ranks.y to the right format (named t stats) for analysis
   ranks.y.v2 <- ranks.y$t
   names(ranks.y.v2) <- ranks.y$rn
-  # Remove duplicates
-  # ranks.y.v2 <- ranks.y.v2[!duplicated(names(ranks.y.v2))]
   
   # Test for significant pathway over-representation
   gsea.epithelial.limma.pseudo[[y]] <- fgsea(gsea.reactome.y, ranks.y.v2, maxSize = 500, minSize = 20) %>% .[order(padj),] %>% .[.$padj < 0.05,]
-  # To make a version without filtering on gene set maximum and minimum sizes
-  # gsea.epithelial.limma.pseudo[[y]] <- fgsea(gsea.reactome.y, ranks.y.v2) %>% .[order(padj),] %>% .[.$padj < 0.05,]
   
   # Create a list of pathways with children collapsed
   gsea.epithelial.limma.pseudo.collapsed[[y]] <- collapsePathways(gsea.epithelial.limma.pseudo[[y]], gsea.reactome.y, stats = ranks.y.v2)
@@ -987,7 +892,6 @@ for(y in names(gsea.epithelial.limma.pseudo)){
     gsea.epithelial.limma.pseudo[[y]][["leadingEdge"]] <- gsea.epithelial.limma.pseudo[[y]][["leadingEdge"]] %>% as.character(.)
   }
 }
-
 
 # Tidy up the environment
 rm(list = c("keep.y", "cts.final.y", "design.y", "dge.y", "dge.voom.y", "cts.voom.y", "fit.y", # Temp objects from limma DE
@@ -1043,12 +947,8 @@ for(z in names(tt.epithelial.DESeq2.pseudo)){
   # Convert ranks.z to the right format (named t stats) for analysis
   ranks.z.v2 <- ranks.z$t
   names(ranks.z.v2) <- ranks.z$rn
-  # Remove duplicates
-  # ranks.z.v2 <- ranks.z.v2[!duplicated(names(ranks.z.v2))]
   # Test for significant pathway over-representation
   gsea.epithelial.DESeq2.pseudo[[z]] <- fgsea(gsea.reactome.z, ranks.z.v2, maxSize = 500, minSize = 20) %>% .[order(padj),] %>% .[.$padj < 0.05,]
-  # To make a version without filtering on gene set maximum and minimum sizes
-  # gsea.epithelial.DESeq2.pseudo <- fgsea(gsea.reactome.z, ranks.z.v2) %>% .[order(padj),] %>% .[.$padj < 0.05,]
   # Create a list of pathways with children collapsed
   gsea.epithelial.DESeq2.pseudo.collapsed[[z]] <- collapsePathways(gsea.epithelial.DESeq2.pseudo[[z]], gsea.reactome.z, stats = ranks.z.v2)
 }
@@ -1092,11 +992,6 @@ for(a in names(gsea.epithelial.DESeq2.pseudo.collapsed)){
   a.1 <- gsea.epithelial.DESeq2.pseudo.collapsed[[a]]$mainPathways
   a.2 <- gsea.epithelial.limma.collapsed[[a]]$mainPathways
   a.3 <- gsea.epithelial.limma.pseudo.collapsed[[a]]$mainPathways
-  
-  # Find out which pathways are present in 
-  # intersect.a <- Reduce(intersect, list(a.1, a.2, a.3))
-  # # Print the intersection out
-  # cat(paste0(a, " Common Parent Pathways:"), paste(intersect.a, collapse = ", "), "\n")
   
   # Create a named list of the sets
   venn.list.a <- list(
@@ -1162,16 +1057,6 @@ for(a in names(gsea.epithelial.DESeq2.pseudo.collapsed)){
     # Assign blank to list element
     gsea.parent.overlap[[a]][["Common parent pathways (limma raw and limma psuedo and DESeq2 pseudo)"]] <- NA
   }
-  
-  
-  # # Find the intersection of the three vectors
-  # intersect.a <- Reduce(intersect, list(a.1, a.2, a.3))
-  # # Print the intersection for this iteration
-  # if (length(intersect.a) > 0) {
-  #   cat(paste0(a, " Common Parent Pathways (3):"), paste(intersect.a, collapse = ", "), "\n")
-  # } else {
-  #   cat("Iteration", a, "no common elements.\n")
-  # }  
 }
 
 # Tidy up the environment
@@ -1285,7 +1170,6 @@ for(b in names(gsea.epithelial.limma.pseudo)){
     dplyr::arrange(avg_rank) %>%
     dplyr::select(-avg_rank)  # Remove temporary rank column after sorting
   # Round adjusted P-values to 4 s.f
-  # gsea.overlap.bbb <- gsea.overlap.bbb %>% dplyr::mutate(across(where(is.numeric), ~ round(.x, 4)))
   gsea.overlap.bbb[] <- lapply(gsea.overlap.bbb, function(column) {
     if (is.numeric(column)) {
       as.character(pref.round(column)) # Convert to character to preserve formatting
@@ -1438,8 +1322,6 @@ for(b in names(gsea.epithelial.limma)){
   gsea.epithelial.limma.table[[b]] <- gsea.epithelial.limma.table[[b]] %>% dplyr::select("Reactome Pathway Term", "Adjusted P-Value", "Size", "Leading Edge")
   # Collapse leading edge from list into vector
   gsea.epithelial.limma.table[[b]]$`Leading Edge` <- sapply(gsea.epithelial.limma.table[[b]]$`Leading Edge` , function(x) paste(x, collapse = ", "))
-  # Sort by pathway alphabetically
-  # gsea.epithelial.limma.table[[b]] <- gsea.epithelial.limma.table[[b]][order(gsea.epithelial.limma.table[[b]]$`Reactome Pathway Term`), ]
   # Sort by adjusted P-value
   gsea.epithelial.limma.table[[b]] <- gsea.epithelial.limma.table[[b]] %>% dplyr::arrange("Adjusted P-Value")
   # Round adjusted P-values to 3 d.p
@@ -1477,8 +1359,6 @@ for(b in names(gsea.epithelial.limma.pseudo)){
   gsea.epithelial.limma.pseudo.table[[b]] <- gsea.epithelial.limma.pseudo.table[[b]] %>% dplyr::select("Reactome Pathway Term", "Adjusted P-Value", "Size", "Leading Edge")
   # Collapse leading edge from list into vector
   gsea.epithelial.limma.pseudo.table[[b]]$`Leading Edge` <- sapply(gsea.epithelial.limma.pseudo.table[[b]]$`Leading Edge` , function(x) paste(x, collapse = ", "))
-  # Sort by pathway alphabetically
-  # gsea.epithelial.limma.pseudo.table[[b]] <- gsea.epithelial.limma.pseudo.table[[b]][order(gsea.epithelial.limma.pseudo.table[[b]]$`Reactome Pathway Term`), ]
   # Sort by adjusted P-value
   gsea.epithelial.limma.pseudo.table[[b]] <- gsea.epithelial.limma.pseudo.table[[b]] %>% dplyr::arrange("Adjusted P-Value")
   # Round adjusted P-values to 3 d.p
@@ -1597,18 +1477,10 @@ p <- ggplot(plot_data, aes(x = type.manual.v1, y = !!sym(i), fill = type.manual.
 
 # Step 4: Show the plot
 print(p)
-# ggsave(filename = paste0(i, "_expression_violin_cancer_vs_all.png"), p, dpi = 300, width = 3000, height = 2000, units = "px")
 ggsave(filename = paste0("3_output/", i, "_expression_violin_cancer_vs_all.png"), p, width = 15.91, height = 12, dpi = 600, units = "cm", bg = "white")
-
-
 ```
 
 ```{r}
-# Load necessary libraries
-library(dplyr)
-library(ggplot2)
-library(ggpubr)
-
 # Perform t-tests and adjust p-values for multiple comparisons
 p_values <- sapply(comp.list, function(comp) {
   group1 <- plot_data %>% filter(type.manual.v1 == comp[1]) %>% pull(!!sym(i))
@@ -1685,8 +1557,6 @@ das.dat.epithelial$cancer.vs.all <- factor(das.dat.epithelial$cancer.vs.all,
 # Verify the new column, including NA counts
 table(das.dat.epithelial$cancer.vs.all, useNA = "ifany")
 ```
-
-
 
 # Cancer Markers for Thesis 3.3.3 as a loop
 * Multiple different clusters here that pop out the same plot, so be careful that you rename it
@@ -1816,7 +1686,6 @@ rm(list = c("i", "gene_expression",
             "processed_plots", "num_cols", "final_plot", "plot.grid"))
 ```
 
-
 # Putative Cancer Stem Cell (CSC) Markers for Thesis
 ```{r}
 # Define markers
@@ -1939,7 +1808,6 @@ ggsave(file = "3_output/Annotated_Clusters_by_Treatment.png", plot = p, width = 
 rm("new_labels")
 ```
 
-
 # Create heatmaps of gene expression in a pathway, comparing expression pre and post treatment.
 ### Extract cancer cells and pathways for heatmap
 ```{r}
@@ -1984,15 +1852,12 @@ rownames(cc) <- c("Treatment")
 # colord <- order(cc)
 
 # Define pathways of interest
-# Large list
-#pathways <- c("The citric acid (TCA) cycle and respiratory electron transport", "Respiratory electron transport", "Beta-catenin independent WNT signaling", "RHO GTPase Effectors", "MAPK family signaling cascades", "Negative regulation of MAPK pathway", "Programmed Cell Death", "Autophagy", "MAPK6/MAPK4 signaling", "Macroautophagy", "Selective autophagy", "MAPK1/MAPK3 signaling", "RAF/MAP kinase cascade", "Complex I biogenesis", "Signaling by WNT", "RAF activation", "MAPK targets/ Nuclear events mediated by MAP kinases", "Pyruvate metabolism and Citric Acid (TCA) cycle", "MTOR signalling", "EGFR downregulation")
 # List for thesis
 pathways <- c("Respiratory electron transport", "Complex I biogenesis", "Beta-catenin independent WNT signaling", "Signaling by WNT", "RHO GTPase Effectors", "MAPK family signaling cascades", "RAF activation", "Autophagy", "Selective autophagy")
 
 # Tidy up the environment
 rm(list = c("x", "x_numeric", "color_palette"))
 ```
-
 
 ### Plot heatmaps
 ```{r}
@@ -2144,14 +2009,4 @@ for(i in pathways){
 
 # Output results to CSV
 write.csv(results_df, "3_output/pathway_metagene_wilcoxon_test_results.csv", row.names = FALSE)
-```
-
-
-```{r}
-# Create a summary table of DE results for thesis
-# Need a column of number of DE genes
-# Need a column of DE genes
-# Need a column of number of fgsea Reactome pathways and collapsed pathways (for visualisation)
-# Need a column of fgsea Reactome pathways
-
 ```

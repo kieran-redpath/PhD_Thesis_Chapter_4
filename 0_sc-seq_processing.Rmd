@@ -1,7 +1,7 @@
 ---
-title: "0_sc-seq_processing"
+title: "Processing sc-seq Data"
 author: "Kieran Redpath"
-date: "2023-10-26"
+date: "29/03/2025"
 output: html_document
 ---
 # Setup
@@ -16,7 +16,6 @@ knitr::opts_chunk$set(engine.opts = list(bash = "-l"))
 * Download with the Illumina BaseSpace downloader
 ```{bash}
 # Navigate to an appropriate directory and download the data from BaseSpace
-# cd ~/Volumes/scratch/cancergeneticslab/ConorVaessenScratch/scDrugMice2023/data/
 # bs download run 265770524
 ```
 
@@ -38,15 +37,12 @@ export PATH=~/Applications/cellranger-7.1.0:$PATH
 * Begin processing all data together
 ```{bash}
 # Navigate to the appropriate directory
-cd ~/R/sc-seq_mouse/bash/runs
-
-# Note that the code for each of these pools points to a reference file stored in /data, which is in Conor's original directory. This reference file pulls other references from Conor's installation of cellranger. This shouldn't matter, but keep it in mind.
 
 # Begin cellranger multi analysis for pool 1
 cellranger multi --id=scDrugMice2023-pool1 --csv=../data/multi-config-FRP-cr7.0-pool1.csv
 
 # Create  a copy of the dasatinib and dasatinib control mouse data (pool 1) in a separate directory to ensure that it isn't affected by any following code (this might not be the most efficient way to do this, in the future you could instead just call the pool1 outs files)
-cp -r ~/R/sc-seq_mouse/bash/runs/scDrugMice2023-pool1/ ~/R/sc-seq_mouse/bash/dasruns/
+cp -r ~/R/PhD_Thesis_Chapter_4/bash/runs/scDrugMice2023-pool1/ ~/R/PhD_Thesis_Chapter_4/bash/dasruns/
 
 # Begin cellranger multi analysis for pool 2
 cellranger multi --id=scDrugMice2023-pool2 --csv=../data/multi-config-FRP-cr7.0-pool2.csv
@@ -60,7 +56,7 @@ cellranger multi --id=scDrugMice2023-pool3 --csv=../data/multi-config-FRP-cr7.0-
 * cellranger aggr needs a reference file with filepaths to .h5 files for each individual run. Columns are sample_id (containing sample IDs), and molecule_h5, with filepaths to .h5 files
 ```{bash}
 # Navigate to the right directory
-cd ~/R/sc-seq_mouse/bash/dasruns
+cd ~/R/PhD_Thesis_Chapter_4/bash/dasruns
 
 # Run cellranger aggr to combine all samples
 cellranger aggr --id=aggAll --normalize=none --csv=aggr_all_samples.csv
@@ -70,7 +66,7 @@ cellranger aggr --id=aggAll --normalize=none --csv=aggr_all_samples.csv
 * cellranger aggr needs a reference file with filepaths to .h5 files for each individual run. Columns are sample_id (containing sample IDs), and molecule_h5, with filepaths to .h5 files
 ```{bash}
 # Navigate to the right directory
-cd ~/R/sc-seq_mouse/bash/runs
+cd ~/R/PhD_Thesis_Chapter_4/bash/runs
 
 # Run cellranger aggr to combine all samples
 cellranger aggr --id=aggAll --normalize=none --csv=aggr_all_samples.csv
@@ -88,10 +84,10 @@ set.seed(42)
 ```
 
 # Load and annotate data for all samples
-* Pre-process the cellranger output for all samples (as done by Conor)
+* Pre-process the cellranger output for all samples
 ```{r}
-# Load the CellRanger output. EVENTUALLY CHANGE THIS TO THE FULLY PROCESSED VERSION AND WHEREVER THAT LIVES, this is just the one Conor has made.
-mouse.dat.10X <- Read10X(data.dir = "~/R/sc-seq_mouse/bash/runs/aggAll/outs/count/filtered_feature_bc_matrix")
+# Load the CellRanger output.
+mouse.dat.10X <- Read10X(data.dir = "~/R/PhD_Thesis_Chapter_4/bash/runs/aggAll/outs/count/filtered_feature_bc_matrix")
 # Initialize the Seurat object with the raw (non-normalized data)
 mouse.dat <- CreateSeuratObject(counts = mouse.dat.10X, project = "druggedMice", names.delim = "-", names.field = 2)
 # Inspect the data
@@ -148,10 +144,10 @@ rm(samp.ident.desc)
 ```
 
 # Load and annotate data for dasatinib samples
-* Pre-process the cellranger output for dasatinib samples (as done by Conor)
+* Pre-process the cellranger output for dasatinib samples
 ```{r}
-# Load the CellRanger output. EVENTUALLY CHANGE THIS TO THE FULLY PROCESSED VERSION AND WHEREVER THAT LIVES, this is just the one Conor has made.
-das.dat.10X <- Read10X(data.dir = "~/R/sc-seq_mouse/bash/dasruns/aggAll/outs/count/filtered_feature_bc_matrix")
+# Load the CellRanger output
+das.dat.10X <- Read10X(data.dir = "~/R/PhD_Thesis_Chapter_4/bash/dasruns/aggAll/outs/count/filtered_feature_bc_matrix")
 # Initialize the Seurat object with the raw (non-normalized data)
 das.dat <- CreateSeuratObject(counts = das.dat.10X, project = "druggedMice", names.delim = "-", names.field = 2)
 # Inspect the data
@@ -207,28 +203,6 @@ rm(samp.ident.plain)
 
 # Save .RDS files for further analysis
 ```{r}
-# All data
-saveRDS(mouse.dat, "~/R/sc-seq_mouse/data/scDrugMiceAll_annotated.RDS")
 # Dasatinib data
-saveRDS(das.dat, "~/R/sc-seq_mouse/data/scDrugMiceDas_annotated.RDS")
-```
-
-# Compare mouse.dat dasatinib samples to das.dat, to ensure that they were processed in the same way 
-```{r}
-# Subset mouse.dat to include only dasatinib samples
-das.mouse.dat <- subset(mouse.dat, subset = treat.ident %in% c("Das - control", "Das - drug"))
-
-# Confirm that the cell numbers are identical for the four dasatinib samples in all workflows
-table(mouse.dat@meta.data[["samp.ident"]])
-table(das.mouse.dat@meta.data[["samp.ident"]])
-table(das.dat@meta.data[["samp.ident"]])
-
-# Confirm that all values of the counts matrix are identical - setdiff should output 0 differences
-setdiff(das.mouse.dat@assays[["RNA"]]@counts, das.dat@assays[["RNA"]]@counts)
-
-# Do the values in counts@i align between the two matrices?
-das.mouse.dat@assays[["RNA"]]@counts@i %in% das.dat@assays[["RNA"]]@counts@i %>% table()
-
-# Do the values in counts@p align between the two matrices?
-das.mouse.dat@assays[["RNA"]]@counts@p %in% das.dat@assays[["RNA"]]@counts@p %>% table()
+saveRDS(das.dat, "~/R/PhD_Thesis_Chapter_4/data/scDrugMiceDas_annotated.RDS")
 ```

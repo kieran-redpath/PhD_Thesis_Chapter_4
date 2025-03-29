@@ -1,7 +1,7 @@
 ---
-title: "Negative Controls"
+title: "Subclustering Epithelial Cells - Negative Controls"
 author: "Kieran Redpath"
-date: "2024-01-19"
+date: "29/03/2025"
 output: html_document
 ---
 
@@ -40,8 +40,6 @@ library(limma)
 library(edgeR)
 library(DESeq2)
 library(patchwork)
-# IF YOU HAVE PROBLEMS WITH ANYTHING AND/OR WANT TO UPDATE SEURAT, BE AWARE OF THIS!!!
-# https://satijalab.org/seurat/articles/announcements#changes-in-seurat-v5
 library(ggpubr)
 # For identifying doublets in data
 library(DoubletFinder)
@@ -89,12 +87,7 @@ pref.round <- function(x) {
 
 ### Load pre-processed das data
 ```{r}
-das.dat <- readRDS("~/R/sc-seq_mouse/2_output/das_dat_processed.RDS")
-```
-
-### Load all data from Conor
-```{r}
-# CV.all.dat <- readRDS("~/R/sc-seq_mouse/data/CV_mice_dat_annotated.RDS")
+das.dat <- readRDS("~/R/PhD_Thesis_Chapter_4/2_output/das_dat_processed.RDS")
 ```
 
 ### Subset data into only epithelial cells for subclustering
@@ -124,8 +117,6 @@ rm(cdh1.expression)
 # Seurat on Epithelial Cells
 ### Carry out the Seurat workflow on only these cells to create new, higher resolution clusters
 ```{r}
-# Found notes online indicating to re-run everything except NormalizeData, as the data is already normalised (in the "data" element of the SeuratObject)
-# das.dat.epithelial <- NormalizeData(object = das.dat.epithelial)
 # Same parameters as larger dataset
 das.dat.epithelial <- FindVariableFeatures(object = das.dat.epithelial, selection.method = "vst", nfeatures = 2000)
 # Same parameters
@@ -152,10 +143,6 @@ rm(all.genes)
 plot.clustree <- clustree(das.dat.epithelial, show_axis = T) + NoLegend() + ylab("Seurat clustering resolution")
 # Output in this chunk
 plot.clustree
-# Save plot
-# png(filename = "3_output/clustree.png", width = 2000, height = 1000, units = "px", res = 150)
-# plot.clustree
-# dev.off()
 
 # Plot clusters by treat ident
 DimPlot(object = das.dat.epithelial, label = T, split.by = "treat.ident")
@@ -263,15 +250,6 @@ VlnPlot(das.dat.epithelial, features = parietal.features) + plot_annotation(titl
 rm(list = c("interesting.features", "chief.features", "mucous.features", "pit.features", "parietal.features"))
 ```
 
-### Plots with median lines and Sefi's genes by Cdh1 expression, as well as some misc stuff
-```{r}
-# Ensure active idents are correct
-Idents(das.dat.epithelial) <- das.dat.epithelial@meta.data[["seurat_clusters"]]
-
-# Reset active idents
-Idents(das.dat.epithelial) <- das.dat.epithelial@meta.data[["seurat_clusters"]]
-```
-
 # Create cell type annotations for further analysis
 ```{r}
 # Ensure the active idents are correct
@@ -321,7 +299,6 @@ randgenes <- sample(rownames(das.dat.epithelial@assays$RNA@counts))
 rownames(das.dat.epithelial@assays$RNA@counts) <- randgenes
 rownames(das.dat.epithelial@assays$RNA@data) <- randgenes
 rownames(das.dat.epithelial@assays$RNA@scale.data) <- randgenes
-
 ```
 
 ### Split up dasatanib data by treatment type for DE analysis
@@ -353,7 +330,6 @@ das.dat.epithelial.list[["Das - drug"]]@assays[["RNA"]]@data %>% dim()
 # 450 drugged cells
 
 # Make objects of treatments per cell
-# IS THIS TREATMENT PER CELL? looks like it's just the ID for the treatment type repeated, without any actual info on which cell is which
 das.epi.control.treat <- das.dat.epithelial.list[["Das - control"]]@meta.data[["treat.ident"]]
 das.epi.dasatinib.treat <- das.dat.epithelial.list[["Das - drug"]]@meta.data[["treat.ident"]]
 
@@ -391,7 +367,7 @@ for(x in levels(das.dat.epithelial@meta.data[["type.manual.v1"]])){
   design.x %>% head()
   design.x %>% tail()
   # Fit linear model
-  # voom plot to see what it looks like - pretty weird, but you don't actually use the voom output here since allegedly it's already normalised
+  # voom plot to see what it looks like
   print(voom(das.epi.combined.x, plot = TRUE))
   fit.x <- lmFit(as.matrix(das.epi.combined.x), design.x)
   fit.x <- eBayes(fit.x)
@@ -426,18 +402,11 @@ for(x in levels(das.dat.epithelial@meta.data[["type.manual.v1"]])){
   # Convert ranks.x to the right format (named t stats) for analysis
   ranks.x.v2 <- ranks.x$t
   names(ranks.x.v2) <- ranks.x$rn
-  # Remove duplicates
-  # ranks.x.v2 <- ranks.x.v2[!duplicated(names(ranks.x.v2))]
   # Test for significant pathway over-representation
   # Save into the gsea.epithelial.limma object
   gsea.epithelial.limma[[x]] <- fgsea(gsea.reactome.x, ranks.x.v2, maxSize = 500, minSize = 20) %>% .[order(padj),] %>% .[.$padj < 0.05,]
-  # names(gsea.epithelial.limma)[x] <- names(tt.epithelial.limma)[x]
-  # To make a version without filtering on gene set maximum and minimum sizes
-  # gsea.epithelial.limma[[x]] <- fgsea(gsea.reactome.x, ranks.x.v2) %>% .[order(padj),] %>% .[.$padj < 0.05,]
-  
   # Create a list of pathways with children collapsed
   gsea.epithelial.limma.collapsed[[x]] <- collapsePathways(gsea.epithelial.limma[[x]], gsea.reactome.x, stats = ranks.x.v2)
-  # names(gsea.epithelial.limma.collapsed)[x] <- names(tt.epithelial.limma)[x]
 }
 
 for(x in levels(das.dat.epithelial@meta.data[["type.manual.v1"]])){
@@ -490,7 +459,6 @@ for(x in names(tt.epithelial.limma)){
     }
   }
   # write.csv(as.data.frame(gsea.table.x), file = paste0("3_output/gsea_limmavoom/", cluster.name, ".csv"))
-  # To save a version without filtering on gene set maximum and minimum sizes
 }
 
 # Tidy up the environment
@@ -552,8 +520,6 @@ gsea.epithelial.limma.pseudo.collapsed <- list()
 
 # Identify differentially expressed genes and run GSEA
 for(y in names(cts.final)){
-  # # Filter out genes that fail to show at least 1 read per million
-  # keep.y <- rowSums(edgeR::cpm(cts.final[[y]])>1) >= 1
   # Filter out genes that fail to show at least 1 read
   keep.y <- rowSums(cts.final[[y]]>1) >= 1
   print(table(keep.y))
@@ -597,14 +563,8 @@ for(y in names(tt.epithelial.limma.pseudo)){
   # Convert ranks.y to the right format (named t stats) for analysis
   ranks.y.v2 <- ranks.y$t
   names(ranks.y.v2) <- ranks.y$rn
-  # Remove duplicates
-  # ranks.y.v2 <- ranks.y.v2[!duplicated(names(ranks.y.v2))]
-  
   # Test for significant pathway over-representation
   gsea.epithelial.limma.pseudo[[y]] <- fgsea(gsea.reactome.y, ranks.y.v2, maxSize = 500, minSize = 20) %>% .[order(padj),] %>% .[.$padj < 0.05,]
-  # To make a version without filtering on gene set maximum and minimum sizes
-  # gsea.epithelial.limma.pseudo[[y]] <- fgsea(gsea.reactome.y, ranks.y.v2) %>% .[order(padj),] %>% .[.$padj < 0.05,]
-  
   # Create a list of pathways with children collapsed
   gsea.epithelial.limma.pseudo.collapsed[[y]] <- collapsePathways(gsea.epithelial.limma.pseudo[[y]], gsea.reactome.y, stats = ranks.y.v2)
 }
@@ -686,12 +646,8 @@ for(z in names(tt.epithelial.DESeq2.pseudo)){
   # Convert ranks.z to the right format (named t stats) for analysis
   ranks.z.v2 <- ranks.z$t
   names(ranks.z.v2) <- ranks.z$rn
-  # Remove duplicates
-  # ranks.z.v2 <- ranks.z.v2[!duplicated(names(ranks.z.v2))]
   # Test for significant pathway over-representation
   gsea.epithelial.DESeq2.pseudo[[z]] <- fgsea(gsea.reactome.z, ranks.z.v2, maxSize = 500, minSize = 20) %>% .[order(padj),] %>% .[.$padj < 0.05,]
-  # To make a version without filtering on gene set maximum and minimum sizes
-  # gsea.epithelial.DESeq2.pseudo <- fgsea(gsea.reactome.z, ranks.z.v2) %>% .[order(padj),] %>% .[.$padj < 0.05,]
   # Create a list of pathways with children collapsed
   gsea.epithelial.DESeq2.pseudo.collapsed[[z]] <- collapsePathways(gsea.epithelial.DESeq2.pseudo[[z]], gsea.reactome.z, stats = ranks.z.v2)
 }
@@ -735,12 +691,7 @@ for(a in names(gsea.epithelial.DESeq2.pseudo.collapsed)){
   a.1 <- gsea.epithelial.DESeq2.pseudo.collapsed[[a]]$mainPathways
   a.2 <- gsea.epithelial.limma.collapsed[[a]]$mainPathways
   a.3 <- gsea.epithelial.limma.pseudo.collapsed[[a]]$mainPathways
-  
-  # Find out which pathways are present in 
-  # intersect.a <- Reduce(intersect, list(a.1, a.2, a.3))
-  # # Print the intersection out
-  # cat(paste0(a, " Common Parent Pathways:"), paste(intersect.a, collapse = ", "), "\n")
-  
+
   # Create a named list of the sets
   venn.list.a <- list(
     "DESeq2 Pseudo-bulked" = a.1,
@@ -805,16 +756,6 @@ for(a in names(gsea.epithelial.DESeq2.pseudo.collapsed)){
     # Assign blank to list element
     gsea.parent.overlap[[a]][["Common parent pathways (limma raw and limma psuedo and DESeq2 pseudo)"]] <- NA
   }
-  
-  
-  # # Find the intersection of the three vectors
-  # intersect.a <- Reduce(intersect, list(a.1, a.2, a.3))
-  # # Print the intersection for this iteration
-  # if (length(intersect.a) > 0) {
-  #   cat(paste0(a, " Common Parent Pathways (3):"), paste(intersect.a, collapse = ", "), "\n")
-  # } else {
-  #   cat("Iteration", a, "no common elements.\n")
-  # }  
 }
 
 # Tidy up the environment
@@ -927,8 +868,6 @@ for(b in names(gsea.epithelial.limma.pseudo)){
     mutate(avg_rank = (rank(`Adjusted P-Value (limma)`) + rank(`Adjusted P-Value (DESeq2)`)) / 2) %>%
     dplyr::arrange(avg_rank) %>%
     dplyr::select(-avg_rank)  # Remove temporary rank column after sorting
-  # Round adjusted P-values to 4 s.f
-  # gsea.overlap.bbb <- gsea.overlap.bbb %>% dplyr::mutate(across(where(is.numeric), ~ round(.x, 4)))
   gsea.overlap.bbb[] <- lapply(gsea.overlap.bbb, function(column) {
     if (is.numeric(column)) {
       as.character(pref.round(column)) # Convert to character to preserve formatting
@@ -1081,8 +1020,6 @@ for(b in names(gsea.epithelial.limma)){
   gsea.epithelial.limma.table[[b]] <- gsea.epithelial.limma.table[[b]] %>% dplyr::select("Reactome Pathway Term", "Adjusted P-Value", "Size", "Leading Edge")
   # Collapse leading edge from list into vector
   gsea.epithelial.limma.table[[b]]$`Leading Edge` <- sapply(gsea.epithelial.limma.table[[b]]$`Leading Edge` , function(x) paste(x, collapse = ", "))
-  # Sort by pathway alphabetically
-  # gsea.epithelial.limma.table[[b]] <- gsea.epithelial.limma.table[[b]][order(gsea.epithelial.limma.table[[b]]$`Reactome Pathway Term`), ]
   # Sort by adjusted P-value
   gsea.epithelial.limma.table[[b]] <- gsea.epithelial.limma.table[[b]] %>% dplyr::arrange("Adjusted P-Value")
   # Round adjusted P-values to 3 d.p
@@ -1120,8 +1057,6 @@ for(b in names(gsea.epithelial.limma.pseudo)){
   gsea.epithelial.limma.pseudo.table[[b]] <- gsea.epithelial.limma.pseudo.table[[b]] %>% dplyr::select("Reactome Pathway Term", "Adjusted P-Value", "Size", "Leading Edge")
   # Collapse leading edge from list into vector
   gsea.epithelial.limma.pseudo.table[[b]]$`Leading Edge` <- sapply(gsea.epithelial.limma.pseudo.table[[b]]$`Leading Edge` , function(x) paste(x, collapse = ", "))
-  # Sort by pathway alphabetically
-  # gsea.epithelial.limma.pseudo.table[[b]] <- gsea.epithelial.limma.pseudo.table[[b]][order(gsea.epithelial.limma.pseudo.table[[b]]$`Reactome Pathway Term`), ]
   # Sort by adjusted P-value
   gsea.epithelial.limma.pseudo.table[[b]] <- gsea.epithelial.limma.pseudo.table[[b]] %>% dplyr::arrange("Adjusted P-Value")
   # Round adjusted P-values to 3 d.p
