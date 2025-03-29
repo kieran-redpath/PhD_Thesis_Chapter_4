@@ -6,9 +6,6 @@
 *.RData
 *.RDataTmp
 
-# R files that are too big to be uploaded
-scDrugMiceDas_annotated.RDS
-
 # User-specific files
 *.Ruserdata
 
